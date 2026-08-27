@@ -4,31 +4,37 @@ import { AppTheme, getTheme, ThemeMode, useSystemTheme } from "./theme";
 type ThemeContextValue = {
   mode: ThemeMode;
   theme: AppTheme;
-  setMode: (mode: ThemeMode) => void;
   toggle: () => void;
 };
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const systemMode = useSystemTheme();
-  const [mode, setMode] = useState<ThemeMode>(systemMode);
+  const systemTheme = useSystemTheme();
+  const [mode, setMode] = useState<ThemeMode>(systemTheme);
 
-  const value = useMemo(
-    () => ({
-      mode,
-      theme: getTheme(mode),
-      setMode,
-      toggle: () => setMode((current) => current === "dark" ? "light" : "dark"),
-    }),
-    [mode]
+  const value = useMemo<ThemeContextValue>(() => ({
+    mode,
+    theme: getTheme(mode),
+    toggle: () =>
+      setMode((current: ThemeMode) =>
+        current === "dark" ? "light" : "dark"
+      ),
+  }), [mode]);
+
+  return (
+    <ThemeContext.Provider value={value}>
+      {children}
+    </ThemeContext.Provider>
   );
-
-  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
-export function useTheme() {
+export function useTheme(): ThemeContextValue {
   const context = useContext(ThemeContext);
-  if (!context) throw new Error("useTheme must be used inside ThemeProvider");
+
+  if (!context) {
+    throw new Error("useTheme must be used inside ThemeProvider");
+  }
+
   return context;
 }

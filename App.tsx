@@ -2,28 +2,44 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   FlatList,
+  Modal,
   SafeAreaView,
+  Share,
   StatusBar,
   StyleSheet,
   Switch,
   Text,
   TextInput,
   TouchableOpacity,
-  View
+  View,
 } from "react-native";
+import * as Clipboard from "expo-clipboard";
 import * as LocalAuthentication from "expo-local-authentication";
+import { CameraView, useCameraPermissions } from "expo-camera";
 
 import {
   initIdentity,
   getIdentity,
-  Identity
+  Identity,
 } from "./src/core/identity";
-
 import { initVault } from "./src/core/vault";
-
 import {
-  useNexChatStore
+  useNexChatStore,
+  Attachment,
+  NexContact,
 } from "./src/core/store";
+import {
+  authenticateBiometric,
+  getRecoveryCode,
+  hasPasscode,
+  isBiometricEnabled,
+  resetPasscodeWithRecovery,
+  setBiometricEnabled,
+  setPasscode,
+  verifyPasscode,
+} from "./src/core/appSecurity";
+import { MediaPicker } from "./src/components/MediaPicker";
+import { MediaPreview } from "./src/components/MediaPreview";
 
 type Tab =
   | "Chats"
@@ -39,10 +55,8 @@ const LIGHT = {
   ink: "#102A43",
   muted: "#66788A",
   brand: "#0C5A8D",
-  brand2: "#167DB7",
   line: "#D9E2EC",
   danger: "#B42318",
-  good: "#087443"
 };
 
 const DARK = {
@@ -51,65 +65,14 @@ const DARK = {
   ink: "#F2F7FA",
   muted: "#9BAEBD",
   brand: "#42A5E5",
-  brand2: "#6CC4F5",
   line: "#263847",
   danger: "#FF8A80",
-  good: "#63D6A0"
 };
-
-function Logo({
-  small = false,
-  colors
-}: {
-  small?: boolean;
-  colors: typeof LIGHT;
-}) {
-  return (
-    <View
-      style={[
-        styles.logo,
-        {
-          backgroundColor: colors.card,
-          borderColor: colors.line
-        },
-        small && {
-          width: 42,
-          height: 42,
-          borderRadius: 14
-        }
-      ]}
-    >
-      <Text
-        style={[
-          styles.logoN,
-          { color: colors.brand },
-          small && { fontSize: 22 }
-        ]}
-      >
-        N
-      </Text>
-
-      <View
-        style={[
-          styles.lock,
-          { borderColor: colors.brand }
-        ]}
-      >
-        <View
-          style={[
-            styles.lockBody,
-            { backgroundColor: colors.brand }
-          ]}
-        />
-      </View>
-    </View>
-  );
-}
 
 function Header({
   title,
   subtitle,
-  colors
+  colors,
 }: {
   title: string;
   subtitle?: string;
@@ -121,72 +84,128 @@ function Header({
         styles.header,
         {
           backgroundColor: colors.card,
-          borderBottomColor: colors.line
-        }
+          borderBottomColor: colors.line,
+        },
       ]}
     >
-      <View style={styles.headerRow}>
-        <Logo small colors={colors} />
-
-        <View>
-          <Text style={[styles.title, { color: colors.ink }]}>
-            {title}
-          </Text>
-
-          {subtitle && (
-            <Text style={[styles.subtitle, { color: colors.muted }]}>
-              {subtitle}
-            </Text>
-          )}
-        </View>
-      </View>
-    </View>
-  );
-}
-
-function Empty({
-  title,
-  body,
-  action,
-  onPress,
-  colors
-}: {
-  title: string;
-  body: string;
-  action?: string;
-  onPress?: () => void;
-  colors: typeof LIGHT;
-}) {
-  return (
-    <View style={styles.empty}>
-      <Logo colors={colors} />
-
-      <Text style={[styles.emptyTitle, { color: colors.ink }]}>
+      <Text style={[styles.title, { color: colors.ink }]}>
         {title}
       </Text>
 
-      <Text style={[styles.emptyBody, { color: colors.muted }]}>
-        {body}
-      </Text>
-
-      {action && (
-        <TouchableOpacity
-          style={[styles.primary, { backgroundColor: colors.brand }]}
-          onPress={onPress}
+      {subtitle && (
+        <Text
+          style={[
+            styles.subtitle,
+            { color: colors.muted },
+          ]}
         >
-          <Text style={styles.primaryText}>{action}</Text>
-        </TouchableOpacity>
+          {subtitle}
+        </Text>
       )}
     </View>
   );
 }
 
-function Chats({
-  onNew,
-  colors
+function Composer({
+  colors,
+  placeholder,
+  multiple,
+  onSubmit,
 }: {
-  onNew: () => void;
   colors: typeof LIGHT;
+  placeholder: string;
+  multiple: boolean;
+  onSubmit: (
+    text: string,
+    media: Attachment[]
+  ) => Promise<void>;
+}) {
+  const [text, setText] = useState("");
+  const [media, setMedia] = useState<Attachment[]>([]);
+
+  return (
+    <View style={styles.form}>
+      <TextInput
+        value={text}
+        onChangeText={setText}
+        placeholder={placeholder}
+        placeholderTextColor={colors.muted}
+        multiline
+        style={[
+          styles.input,
+          {
+            backgroundColor: colors.card,
+            borderColor: colors.line,
+            color: colors.ink,
+          },
+        ]}
+      />
+
+      <MediaPicker
+        multiple={multiple}
+        onSelected={(items) =>
+          setMedia(
+            multiple
+              ? [...media, ...items].slice(0, 10)
+              : items.slice(0, 1)
+          )
+        }
+      />
+
+      {!!media.length && (
+        <FlatList
+          horizontal
+          data={media}
+          keyExtractor={(item, index) =>
+            `${item.uri}-${index}`
+          }
+          contentContainerStyle={{ gap: 8 }}
+          renderItem={({ item, index }) => (
+            <MediaPreview
+              media={item}
+              onRemove={() =>
+                setMedia(
+                  media.filter((_, mediaIndex) =>
+                    mediaIndex === index ? false : true
+                  )
+                )
+              }
+            />
+          )}
+        />
+      )}
+
+      <TouchableOpacity
+        style={[
+          styles.primary,
+          { backgroundColor: colors.brand },
+        ]}
+        onPress={async () => {
+          if (!text.trim() && !media.length) {
+            Alert.alert(
+              "Nothing to post",
+              "Add text, a photo or a video."
+            );
+            return;
+          }
+
+          await onSubmit(text.trim(), media);
+          setText("");
+          setMedia([]);
+        }}
+      >
+        <Text style={styles.primaryText}>Publish</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+function Chats({
+  colors,
+  onNew,
+}: {
+  colors: typeof LIGHT;
+  onNew: () => void;
 }) {
   const { messages } = useNexChatStore();
 
@@ -198,77 +217,72 @@ function Chats({
         colors={colors}
       />
 
-      {messages.length === 0 ? (
-        <Empty
-          title="Your messages stay yours"
-          body="Start a local conversation. Messages are stored through the encrypted local vault."
-          action="New message"
-          onPress={onNew}
-          colors={colors}
-        />
-      ) : (
-        <FlatList
-          data={messages}
-          keyExtractor={(_, index) => String(index)}
-          contentContainerStyle={styles.list}
-          renderItem={({ item }) => (
-            <View
+      <FlatList
+        data={messages}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={styles.list}
+        ListEmptyComponent={
+          <Text
+            style={[
+              styles.emptyText,
+              { color: colors.muted },
+            ]}
+          >
+            No conversations yet.
+          </Text>
+        }
+        renderItem={({ item }) => (
+          <View
+            style={[
+              styles.card,
+              {
+                backgroundColor: colors.card,
+                borderColor: colors.line,
+              },
+            ]}
+          >
+            <Text
               style={[
-                styles.chatCard,
-                {
-                  backgroundColor: colors.card,
-                  borderColor: colors.line
-                }
+                styles.cardTitle,
+                { color: colors.ink },
               ]}
             >
-              <View
+              {item.peer}
+            </Text>
+
+            {!!item.text && (
+              <Text
                 style={[
-                  styles.avatar,
-                  { backgroundColor: colors.bg }
+                  styles.cardBody,
+                  { color: colors.muted },
                 ]}
               >
-                <Text
-                  style={[
-                    styles.avatarText,
-                    { color: colors.brand }
-                  ]}
-                >
-                  {item.peer[0]?.toUpperCase()}
-                </Text>
-              </View>
-
-              <View style={styles.flex}>
-                <Text
-                  style={[
-                    styles.cardTitle,
-                    { color: colors.ink }
-                  ]}
-                >
-                  {item.peer}
-                </Text>
-
-                <Text
-                  style={[
-                    styles.cardBody,
-                    { color: colors.muted }
-                  ]}
-                >
-                  {item.text}
-                </Text>
-              </View>
-
-              <Text style={[styles.time, { color: colors.muted }]}>
-                {item.status}
+                {item.text}
               </Text>
-            </View>
-          )}
-        />
-      )}
+            )}
+
+            {item.attachment && (
+              <View style={{ marginTop: 10 }}>
+                <MediaPreview media={item.attachment} />
+              </View>
+            )}
+
+            <Text
+              style={[
+                styles.time,
+                { color: colors.muted },
+              ]}
+            >
+              {item.status}
+            </Text>
+          </View>
+        )}
+      />
 
       <TouchableOpacity
         style={[
           styles.fab,
-          { backgroundColor: colors.brand }
+          { backgroundColor: colors.brand },
         ]}
         onPress={onNew}
       >
@@ -279,29 +293,70 @@ function Chats({
 }
 
 function NewMessage({
+  colors,
   onDone,
-  colors
 }: {
-  onDone: () => void;
   colors: typeof LIGHT;
+  onDone: () => void;
 }) {
+  const { contacts, addMessage } = useNexChatStore();
   const [peer, setPeer] = useState("");
   const [text, setText] = useState("");
-
-  const { addMessage } = useNexChatStore();
+  const [media, setMedia] = useState<Attachment[]>([]);
 
   return (
     <View style={styles.flex}>
       <Header
         title="New message"
-        subtitle="No phone number required"
+        subtitle="Text, photos and videos"
         colors={colors}
       />
 
       <View style={styles.form}>
-        <Text style={[styles.label, { color: colors.ink }]}>
-          NexChat ID or contact
+        <Text
+          style={[
+            styles.label,
+            { color: colors.ink },
+          ]}
+        >
+          NexChat contact
         </Text>
+
+        <FlatList
+          horizontal
+          data={contacts}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={{ gap: 8 }}
+          renderItem={({ item }) => (
+            <TouchableOpacity
+              style={[
+                styles.contactChip,
+                {
+                  backgroundColor: colors.card,
+                  borderColor: colors.line,
+                },
+              ]}
+              onPress={() => setPeer(item.id)}
+            >
+              <Text
+                style={[
+                  styles.contactName,
+                  { color: colors.ink },
+                ]}
+              >
+                {item.displayName}
+              </Text>
+              <Text
+                style={[
+                  styles.time,
+                  { color: colors.muted },
+                ]}
+              >
+                {item.id}
+              </Text>
+            </TouchableOpacity>
+          )}
+        />
 
         <TextInput
           value={peer}
@@ -313,14 +368,10 @@ function NewMessage({
             {
               backgroundColor: colors.card,
               borderColor: colors.line,
-              color: colors.ink
-            }
+              color: colors.ink,
+            },
           ]}
         />
-
-        <Text style={[styles.label, { color: colors.ink }]}>
-          Message
-        </Text>
 
         <TextInput
           value={text}
@@ -334,29 +385,51 @@ function NewMessage({
             {
               backgroundColor: colors.card,
               borderColor: colors.line,
-              color: colors.ink
-            }
+              color: colors.ink,
+            },
           ]}
         />
+
+        <MediaPicker
+          onSelected={(items) =>
+            setMedia(items.slice(0, 1))
+          }
+        />
+
+        {!!media[0] && (
+          <MediaPreview
+            media={media[0]}
+            onRemove={() => setMedia([])}
+          />
+        )}
 
         <TouchableOpacity
           style={[
             styles.primary,
-            { backgroundColor: colors.brand }
+            { backgroundColor: colors.brand },
           ]}
           onPress={async () => {
-            if (!peer.trim() || !text.trim()) {
+            if (!peer.trim()) {
               Alert.alert(
-                "Missing information",
-                "Enter a contact and message."
+                "Choose a contact",
+                "Select or enter a NexChat ID."
+              );
+              return;
+            }
+
+            if (!text.trim() && !media[0]) {
+              Alert.alert(
+                "Empty message",
+                "Add text or media."
               );
               return;
             }
 
             await addMessage({
-              peer,
-              text,
-              status: "Queued locally"
+              peer: peer.trim(),
+              text: text.trim(),
+              status: "Queued locally",
+              attachment: media[0],
             });
 
             onDone();
@@ -373,130 +446,95 @@ function NewMessage({
 
 function Stories({
   colors,
-  identity
+  identity,
 }: {
   colors: typeof LIGHT;
   identity: Identity;
 }) {
-  const {
-    stories,
-    addStory,
-    viewStory
-  } = useNexChatStore();
-
-  const [text, setText] = useState("");
+  const { stories, addStory, viewStory } =
+    useNexChatStore();
 
   return (
     <View style={styles.flex}>
       <Header
         title="Stories"
-        subtitle="Disappears after 24 hours"
+        subtitle="Photos and videos · 24-hour expiry"
         colors={colors}
       />
 
-      <View style={styles.form}>
-        <TextInput
-          value={text}
-          onChangeText={setText}
-          placeholder="Share a moment…"
-          placeholderTextColor={colors.muted}
-          style={[
-            styles.input,
-            {
-              backgroundColor: colors.card,
-              borderColor: colors.line,
-              color: colors.ink
-            }
-          ]}
-        />
-
-        <TouchableOpacity
-          style={[
-            styles.primary,
-            { backgroundColor: colors.brand }
-          ]}
-          onPress={async () => {
-            if (!text.trim()) return;
-
-            await addStory(identity.id, text.trim());
-            setText("");
-          }}
-        >
-          <Text style={styles.primaryText}>
-            Post story
-          </Text>
-        </TouchableOpacity>
-      </View>
+      <Composer
+        colors={colors}
+        placeholder="Share a moment…"
+        multiple={false}
+        onSubmit={async (caption, media) => {
+          await addStory({
+            authorId: identity.id,
+            caption,
+            media: media[0],
+          });
+        }}
+      />
 
       <FlatList
         data={stories}
-        keyExtractor={item => item.id}
+        keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
         ListEmptyComponent={
-          <Empty
-            title="No active stories"
-            body="Stories automatically expire after 24 hours."
-            colors={colors}
-          />
+          <Text
+            style={[
+              styles.emptyText,
+              { color: colors.muted },
+            ]}
+          >
+            No active stories.
+          </Text>
         }
         renderItem={({ item }) => (
           <TouchableOpacity
-            onPress={() => viewStory(item.id)}
             style={[
-              styles.post,
+              styles.card,
               {
                 backgroundColor: colors.card,
                 borderColor: item.viewed
                   ? colors.line
-                  : colors.brand
-              }
+                  : colors.brand,
+              },
             ]}
+            onPress={() => viewStory(item.id)}
           >
-            <View style={styles.storyHeader}>
-              <View
+            <Text
+              style={[
+                styles.cardTitle,
+                { color: colors.ink },
+              ]}
+            >
+              {item.authorId}
+            </Text>
+
+            {!!item.caption && (
+              <Text
                 style={[
-                  styles.avatar,
-                  { backgroundColor: colors.bg }
+                  styles.cardBody,
+                  { color: colors.ink },
                 ]}
               >
-                <Text
-                  style={[
-                    styles.avatarText,
-                    { color: colors.brand }
-                  ]}
-                >
-                  {item.author[0]?.toUpperCase()}
-                </Text>
-              </View>
+                {item.caption}
+              </Text>
+            )}
 
-              <View style={styles.flex}>
-                <Text
-                  style={[
-                    styles.cardTitle,
-                    { color: colors.ink }
-                  ]}
-                >
-                  {item.author}
-                </Text>
-
-                <Text
-                  style={[
-                    styles.time,
-                    { color: colors.muted }
-                  ]}
-                >
-                  {item.viewed ? "Viewed" : "New"}
-                </Text>
+            {item.media && (
+              <View style={{ marginTop: 10 }}>
+                <MediaPreview media={item.media} />
               </View>
-            </View>
+            )}
 
             <Text
               style={[
-                styles.storyText,
-                { color: colors.ink }
+                styles.time,
+                { color: colors.muted },
               ]}
             >
-              {item.text}
+              {item.viewed ? "Viewed" : "New"} · expires in 24h
             </Text>
           </TouchableOpacity>
         )}
@@ -507,96 +545,88 @@ function Stories({
 
 function Feed({
   colors,
-  identity
+  identity,
 }: {
   colors: typeof LIGHT;
   identity: Identity;
 }) {
-  const {
-    feed,
-    addFeedPost,
-    toggleLike
-  } = useNexChatStore();
-
-  const [text, setText] = useState("");
+  const { feed, addFeedPost, toggleLike } =
+    useNexChatStore();
 
   return (
     <View style={styles.flex}>
       <Header
         title="Feed"
-        subtitle="Public posts · separate from private chats"
+        subtitle="Public posts · text, photos and videos"
         colors={colors}
       />
 
-      <View style={styles.form}>
-        <TextInput
-          value={text}
-          onChangeText={setText}
-          placeholder="What's happening?"
-          placeholderTextColor={colors.muted}
-          multiline
-          style={[
-            styles.input,
-            {
-              backgroundColor: colors.card,
-              borderColor: colors.line,
-              color: colors.ink
-            }
-          ]}
-        />
-
-        <TouchableOpacity
-          style={[
-            styles.primary,
-            { backgroundColor: colors.brand }
-          ]}
-          onPress={async () => {
-            if (!text.trim()) return;
-
-            await addFeedPost(identity.id, text.trim());
-            setText("");
-          }}
-        >
-          <Text style={styles.primaryText}>
-            Publish
-          </Text>
-        </TouchableOpacity>
-      </View>
+      <Composer
+        colors={colors}
+        placeholder="What's happening?"
+        multiple
+        onSubmit={async (caption, media) => {
+          await addFeedPost({
+            authorId: identity.id,
+            caption,
+            media,
+          });
+        }}
+      />
 
       <FlatList
         data={feed}
-        keyExtractor={item => item.id}
+        keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
         renderItem={({ item }) => (
           <View
             style={[
-              styles.post,
+              styles.card,
               {
                 backgroundColor: colors.card,
-                borderColor: colors.line
-              }
+                borderColor: colors.line,
+              },
             ]}
           >
             <Text
               style={[
                 styles.cardTitle,
-                { color: colors.ink }
+                { color: colors.ink },
               ]}
             >
-              {item.author}
+              {item.authorId}
             </Text>
 
-            <Text
-              style={[
-                styles.cardBody,
-                { color: colors.ink }
-              ]}
-            >
-              {item.text}
-            </Text>
+            {!!item.caption && (
+              <Text
+                style={[
+                  styles.cardBody,
+                  { color: colors.ink },
+                ]}
+              >
+                {item.caption}
+              </Text>
+            )}
+
+            {!!item.media?.length && (
+              <FlatList
+                horizontal
+                data={item.media}
+                keyExtractor={(media, index) =>
+                  `${media.uri}-${index}`
+                }
+                contentContainerStyle={{
+                  gap: 8,
+                  marginTop: 10,
+                }}
+                renderItem={({ item: media }) => (
+                  <MediaPreview media={media} />
+                )}
+              />
+            )}
 
             <TouchableOpacity
-              style={styles.like}
+              style={styles.likeButton}
               onPress={() => toggleLike(item.id)}
             >
               <Text
@@ -605,8 +635,8 @@ function Feed({
                   {
                     color: item.liked
                       ? colors.brand
-                      : colors.muted
-                  }
+                      : colors.muted,
+                  },
                 ]}
               >
                 {item.liked ? "♥" : "♡"} {item.likes}
@@ -619,101 +649,286 @@ function Feed({
   );
 }
 
-function Calls({
-  colors
+function IDModal({
+  identity,
+  colors,
+  visible,
+  onClose,
 }: {
+  identity: Identity;
   colors: typeof LIGHT;
+  visible: boolean;
+  onClose: () => void;
 }) {
-  return (
-    <View style={styles.flex}>
-      <Header
-        title="Calls"
-        subtitle="Voice and video transport"
-        colors={colors}
-      />
+  const [cameraPermission, requestCameraPermission] =
+    useCameraPermissions();
+  const [scanner, setScanner] = useState(false);
 
-      <Empty
-        title="Calls transport ready"
-        body="Local, nearby and relay transports can share this call interface."
-        colors={colors}
-      />
-    </View>
+  return (
+    <Modal visible={visible} transparent animationType="slide">
+      <View style={styles.modalBackdrop}>
+        <View
+          style={[
+            styles.modal,
+            { backgroundColor: colors.card },
+          ]}
+        >
+          <Text
+            style={[
+              styles.modalTitle,
+              { color: colors.ink },
+            ]}
+          >
+            Your NexChat ID
+          </Text>
+
+          <View
+            style={[
+              styles.qrBox,
+              { borderColor: colors.line },
+            ]}
+          >
+            <Text
+              style={[
+                styles.qrFake,
+                { color: colors.ink },
+              ]}
+            >
+              ▦
+            </Text>
+            <Text
+              style={[
+                styles.qrId,
+                { color: colors.ink },
+              ]}
+            >
+              {identity.id}
+            </Text>
+          </View>
+
+          <TouchableOpacity
+            style={styles.secondary}
+            onPress={async () => {
+              await Clipboard.setStringAsync(identity.id);
+              Alert.alert(
+                "Copied",
+                "Your NexChat ID is on the clipboard."
+              );
+            }}
+          >
+            <Text style={styles.secondaryText}>
+              Copy ID
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.secondary}
+            onPress={() =>
+              Share.share({
+                message: `Connect with me on NexChat: ${identity.id}`,
+              })
+            }
+          >
+            <Text style={styles.secondaryText}>
+              Share ID / Link
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.secondary}
+            onPress={async () => {
+              if (!cameraPermission?.granted) {
+                const result =
+                  await requestCameraPermission();
+
+                if (!result.granted) {
+                  Alert.alert(
+                    "Camera permission",
+                    "Camera access is required to scan a NexChat QR code."
+                  );
+                  return;
+                }
+              }
+
+              setScanner(true);
+            }}
+          >
+            <Text style={styles.secondaryText}>
+              Scan QR
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity onPress={onClose}>
+            <Text
+              style={[
+                styles.close,
+                { color: colors.muted },
+              ]}
+            >
+              Close
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <Modal visible={scanner} animationType="slide">
+        <CameraView
+          style={{ flex: 1 }}
+          barcodeScannerSettings={{
+            barcodeTypes: ["qr"],
+          }}
+          onBarcodeScanned={(result) => {
+            setScanner(false);
+            Alert.alert(
+              "NexChat QR detected",
+              result.data
+            );
+          }}
+        >
+          <View style={styles.scannerOverlay}>
+            <TouchableOpacity
+              style={styles.scannerClose}
+              onPress={() => setScanner(false)}
+            >
+              <Text style={styles.primaryText}>
+                Close scanner
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </CameraView>
+      </Modal>
+    </Modal>
   );
 }
 
-function Vault({
-  colors
+function SecurityGate({
+  onUnlocked,
 }: {
-  colors: typeof LIGHT;
+  onUnlocked: () => void;
 }) {
-  const { vaultBytes } = useNexChatStore();
+  const [passcode, setPasscodeInput] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      if (await isBiometricEnabled()) {
+        const success = await authenticateBiometric();
+
+        if (success) onUnlocked();
+      }
+    })();
+  }, []);
 
   return (
-    <View style={styles.flex}>
-      <Header
-        title="Vault"
-        subtitle="Private device storage"
-        colors={colors}
+    <SafeAreaView style={styles.gate}>
+      <Text style={styles.gateTitle}>
+        NexChat Locked
+      </Text>
+
+      <Text style={styles.gateBody}>
+        Unlock with your device biometric or NexChat passcode.
+      </Text>
+
+      <TextInput
+        value={passcode}
+        onChangeText={setPasscodeInput}
+        keyboardType="number-pad"
+        secureTextEntry
+        maxLength={6}
+        placeholder="6-digit passcode"
+        style={styles.gateInput}
       />
 
-      <View style={styles.form}>
-        <View
-          style={[
-            styles.stat,
-            {
-              backgroundColor: colors.card,
-              borderColor: colors.line
+      <TouchableOpacity
+        style={styles.gateButton}
+        disabled={busy}
+        onPress={async () => {
+          setBusy(true);
+
+          try {
+            const valid = await verifyPasscode(
+              passcode
+            );
+
+            if (!valid) {
+              Alert.alert(
+                "Incorrect passcode",
+                "Try again or use Forgot passcode."
+              );
+              return;
             }
-          ]}
-        >
-          <Text
-            style={[
-              styles.cardTitle,
-              { color: colors.ink }
-            ]}
-          >
-            Encrypted local payload
-          </Text>
 
-          <Text
-            style={[
-              styles.statValue,
-              { color: colors.brand }
-            ]}
-          >
-            {vaultBytes} bytes
-          </Text>
-        </View>
+            onUnlocked();
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <Text style={styles.primaryText}>
+          Unlock
+        </Text>
+      </TouchableOpacity>
 
-        <View
-          style={[
-            styles.stat,
-            {
-              backgroundColor: colors.card,
-              borderColor: colors.line
-            }
-          ]}
-        >
-          <Text
-            style={[
-              styles.cardTitle,
-              { color: colors.ink }
-            ]}
-          >
-            Privacy boundary
-          </Text>
+      <TouchableOpacity
+        onPress={async () => {
+          const code = await getRecoveryCode();
 
-          <Text
-            style={[
-              styles.cardBody,
-              { color: colors.muted }
-            ]}
-          >
-            Private messages remain separate from public Feed and Stories data.
-          </Text>
-        </View>
-      </View>
-    </View>
+          if (!code) {
+            Alert.alert(
+              "No recovery code",
+              "No recovery credential is configured on this device."
+            );
+            return;
+          }
+
+          Alert.prompt(
+            "Forgot passcode",
+            "Enter your NexChat recovery code.",
+            [
+              { text: "Cancel", style: "cancel" },
+              {
+                text: "Continue",
+                onPress: async (recovery?: string) => {
+                  Alert.prompt(
+                    "New passcode",
+                    "Enter a new 6-digit passcode.",
+                    [
+                      { text: "Cancel", style: "cancel" },
+                      {
+                        text: "Reset",
+                        onPress: async (newPasscode?: string) => {
+                          try {
+                            await resetPasscodeWithRecovery(
+                              recovery || "",
+                              newPasscode || ""
+                            );
+                            Alert.alert(
+                              "Passcode reset",
+                              "Your new passcode is ready."
+                            );
+                          } catch (error) {
+                            Alert.alert(
+                              "Reset failed",
+                              error instanceof Error
+                                ? error.message
+                                : "Invalid recovery code."
+                            );
+                          }
+                        },
+                      },
+                    ]
+                  );
+                },
+              },
+            ]
+          );
+        }}
+      >
+        <Text style={styles.forgot}>
+          Forgot passcode?
+        </Text>
+      </TouchableOpacity>
+    </SafeAreaView>
   );
 }
 
@@ -722,7 +937,7 @@ function Settings({
   colors,
   dark,
   setDark,
-  onReset
+  onReset,
 }: {
   identity: Identity;
   colors: typeof LIGHT;
@@ -730,13 +945,74 @@ function Settings({
   setDark: (value: boolean) => void;
   onReset: () => void;
 }) {
-  const [bio, setBio] = useState(false);
+  const [biometric, setBiometric] = useState(false);
+  const [passwordExists, setPasswordExists] =
+    useState(false);
+
+  useEffect(() => {
+    (async () => {
+      setBiometric(await isBiometricEnabled());
+      setPasswordExists(await hasPasscode());
+    })();
+  }, []);
+
+  const configurePasscode = () => {
+    Alert.prompt(
+      passwordExists
+        ? "Change passcode"
+        : "Create passcode",
+      "Enter a new 6-digit NexChat passcode.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Continue",
+          onPress: (value?: string) => {
+            Alert.prompt(
+              "Confirm passcode",
+              "Enter the same passcode again.",
+              [
+                { text: "Cancel", style: "cancel" },
+                {
+                  text: "Save",
+                  onPress: async (confirm?: string) => {
+                    if (!value || value !== confirm) {
+                      Alert.alert(
+                        "Mismatch",
+                        "The passcodes do not match."
+                      );
+                      return;
+                    }
+
+                    try {
+                      await setPasscode(value);
+                      setPasswordExists(true);
+                      Alert.alert(
+                        "Saved",
+                        "Your NexChat passcode is configured."
+                      );
+                    } catch (error) {
+                      Alert.alert(
+                        "Invalid passcode",
+                        error instanceof Error
+                          ? error.message
+                          : "Use exactly 6 digits."
+                      );
+                    }
+                  },
+                },
+              ]
+            );
+          },
+        },
+      ]
+    );
+  };
 
   return (
     <View style={styles.flex}>
       <Header
         title="Settings"
-        subtitle="Identity, security and appearance"
+        subtitle="Identity, privacy and device protection"
         colors={colors}
       />
 
@@ -745,35 +1021,28 @@ function Settings({
         data={[
           {
             title: "Your NexChat ID",
-            body: identity.id
+            body: identity.id,
           },
           {
-            title: "Recovery Kit",
-            body: "Generate and export a recovery package before trusting additional devices."
+            title: "Recovery",
+            body:
+              "Keep your recovery code somewhere safe. It is required if you forget your local passcode.",
           },
-          {
-            title: "Trusted devices",
-            body: "Review and revoke devices that can access your identity."
-          },
-          {
-            title: "Remote lock",
-            body: "Lock the account from a trusted device if your phone is stolen."
-          }
         ]}
         renderItem={({ item }) => (
           <View
             style={[
-              styles.setting,
+              styles.card,
               {
                 backgroundColor: colors.card,
-                borderColor: colors.line
-              }
+                borderColor: colors.line,
+              },
             ]}
           >
             <Text
               style={[
                 styles.cardTitle,
-                { color: colors.ink }
+                { color: colors.ink },
               ]}
             >
               {item.title}
@@ -782,7 +1051,7 @@ function Settings({
             <Text
               style={[
                 styles.cardBody,
-                { color: colors.muted }
+                { color: colors.muted },
               ]}
             >
               {item.body}
@@ -790,25 +1059,24 @@ function Settings({
           </View>
         )}
         ListFooterComponent={
-          <View style={styles.settingsFooter}>
+          <View style={{ gap: 10 }}>
             <View
               style={[
-                styles.row,
+                styles.settingRow,
                 {
                   backgroundColor: colors.card,
-                  borderColor: colors.line
-                }
+                  borderColor: colors.line,
+                },
               ]}
             >
               <Text
                 style={[
                   styles.cardTitle,
-                  { color: colors.ink }
+                  { color: colors.ink },
                 ]}
               >
                 Dark theme
               </Text>
-
               <Switch
                 value={dark}
                 onValueChange={setDark}
@@ -817,60 +1085,103 @@ function Settings({
 
             <View
               style={[
-                styles.row,
+                styles.settingRow,
                 {
                   backgroundColor: colors.card,
-                  borderColor: colors.line
-                }
+                  borderColor: colors.line,
+                },
               ]}
             >
-              <Text
-                style={[
-                  styles.cardTitle,
-                  { color: colors.ink }
-                ]}
-              >
-                Biometric unlock
-              </Text>
+              <View style={{ flex: 1 }}>
+                <Text
+                  style={[
+                    styles.cardTitle,
+                    { color: colors.ink },
+                  ]}
+                >
+                  Biometric app lock
+                </Text>
+
+                <Text
+                  style={[
+                    styles.cardBody,
+                    { color: colors.muted },
+                  ]}
+                >
+                  Requires Face ID, fingerprint or the
+                  device security fallback when NexChat
+                  is locked.
+                </Text>
+              </View>
 
               <Switch
-                value={bio}
-                onValueChange={async value => {
-                  if (value) {
-                    const available =
-                      await LocalAuthentication.hasHardwareAsync();
-
-                    if (!available) {
+                value={biometric}
+                onValueChange={async (value) => {
+                  try {
+                    if (value && !passwordExists) {
                       Alert.alert(
-                        "Unavailable",
-                        "This device does not expose biometric hardware."
+                        "Create a passcode first",
+                        "Biometric lock requires a NexChat passcode as the secure fallback."
                       );
                       return;
                     }
-                  }
 
-                  setBio(value);
+                    await setBiometricEnabled(value);
+                    setBiometric(value);
+                  } catch (error) {
+                    Alert.alert(
+                      "Biometric unavailable",
+                      error instanceof Error
+                        ? error.message
+                        : "Unable to configure biometrics."
+                    );
+                  }
                 }}
               />
             </View>
 
             <TouchableOpacity
-              style={[
-                styles.danger,
-                {
-                  backgroundColor: colors.card,
-                  borderColor: colors.danger
+              style={styles.secondary}
+              onPress={configurePasscode}
+            >
+              <Text style={styles.secondaryText}>
+                {passwordExists
+                  ? "Change passcode"
+                  : "Create passcode"}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.secondary}
+              onPress={async () => {
+                const code = await getRecoveryCode();
+
+                if (!code) {
+                  Alert.alert(
+                    "Recovery unavailable",
+                    "Create a passcode first."
+                  );
+                  return;
                 }
-              ]}
+
+                await Share.share({
+                  message:
+                    `NexChat recovery code: ${code}\n\n` +
+                    "Store this somewhere private. Anyone with this code can reset the local NexChat passcode.",
+                });
+              }}
+            >
+              <Text style={styles.secondaryText}>
+                View / share recovery code
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.danger}
               onPress={onReset}
             >
-              <Text
-                style={[
-                  styles.dangerText,
-                  { color: colors.danger }
-                ]}
-              >
-                Reset local demo data
+              <Text style={styles.dangerText}>
+                Reset local data
               </Text>
             </TouchableOpacity>
           </View>
@@ -882,9 +1193,13 @@ function Settings({
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("Chats");
-  const [newMsg, setNewMsg] = useState(false);
-  const [identity, setIdentity] = useState<Identity | null>(null);
+  const [newMessage, setNewMessage] =
+    useState(false);
+  const [identity, setIdentity] =
+    useState<Identity | null>(null);
   const [dark, setDark] = useState(false);
+  const [locked, setLocked] = useState(false);
+  const [idModal, setIdModal] = useState(false);
 
   const { hydrate, reset } = useNexChatStore();
 
@@ -896,29 +1211,62 @@ export default function App() {
       await initIdentity();
 
       const id = await getIdentity();
-
       setIdentity(id);
 
       await hydrate();
+
+      if (await hasPasscode()) {
+        if (await isBiometricEnabled()) {
+          const success =
+            await authenticateBiometric();
+
+          setLocked(!success);
+        } else {
+          setLocked(true);
+        }
+      }
     })();
   }, []);
 
-  const screen = useMemo(() => {
-    if (!identity) {
-      return (
-        <Empty
-          title="Preparing NexChat Core"
-          body="Initializing local identity and secure storage…"
-          colors={colors}
-        />
-      );
-    }
+  useEffect(() => {
+    if (!locked) return;
 
-    if (newMsg) {
+    const interval = setInterval(async () => {
+      if (await isBiometricEnabled()) {
+        const success =
+          await authenticateBiometric();
+
+        if (success) setLocked(false);
+      }
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, [locked]);
+
+  if (!identity) {
+    return (
+      <SafeAreaView style={styles.gate}>
+        <Text style={styles.gateTitle}>
+          Preparing NexChat
+        </Text>
+      </SafeAreaView>
+    );
+  }
+
+  if (locked) {
+    return (
+      <SecurityGate
+        onUnlocked={() => setLocked(false)}
+      />
+    );
+  }
+
+  const screen = (() => {
+    if (newMessage) {
       return (
         <NewMessage
           colors={colors}
-          onDone={() => setNewMsg(false)}
+          onDone={() => setNewMessage(false)}
         />
       );
     }
@@ -927,7 +1275,7 @@ export default function App() {
       return (
         <Chats
           colors={colors}
-          onNew={() => setNewMsg(true)}
+          onNew={() => setNewMessage(true)}
         />
       );
     }
@@ -951,11 +1299,89 @@ export default function App() {
     }
 
     if (tab === "Calls") {
-      return <Calls colors={colors} />;
+      return (
+        <View style={styles.flex}>
+          <Header
+            title="Calls"
+            subtitle="Voice and video"
+            colors={colors}
+          />
+
+          <View style={styles.form}>
+            <Text
+              style={[
+                styles.cardBody,
+                { color: colors.muted },
+              ]}
+            >
+              Calls use the same NexChat contact directory.
+              Select a contact before connecting a future
+              voice/video transport.
+            </Text>
+
+            <TouchableOpacity
+              style={[
+                styles.primary,
+                { backgroundColor: colors.brand },
+              ]}
+              onPress={() =>
+                Alert.alert(
+                  "Contact picker",
+                  "Use your NexChat contacts when the call transport is connected."
+                )
+              }
+            >
+              <Text style={styles.primaryText}>
+                ＋ Select contact
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
     }
 
     if (tab === "Vault") {
-      return <Vault colors={colors} />;
+      const { vaultBytes } = useNexChatStore();
+
+      return (
+        <View style={styles.flex}>
+          <Header
+            title="Vault"
+            subtitle="Encrypted private device storage"
+            colors={colors}
+          />
+
+          <View style={styles.form}>
+            <View
+              style={[
+                styles.card,
+                {
+                  backgroundColor: colors.card,
+                  borderColor: colors.line,
+                },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.cardTitle,
+                  { color: colors.ink },
+                ]}
+              >
+                Encrypted payload
+              </Text>
+
+              <Text
+                style={[
+                  styles.statValue,
+                  { color: colors.brand },
+                ]}
+              >
+                {vaultBytes} bytes
+              </Text>
+            </View>
+          </View>
+        </View>
+      );
     }
 
     return (
@@ -966,338 +1392,231 @@ export default function App() {
         setDark={setDark}
         onReset={async () => {
           await reset();
-
           Alert.alert(
-            "Reset",
-            "Local demo data cleared."
+            "Reset complete",
+            "Local NexChat content has been cleared."
           );
         }}
       />
     );
-  }, [
-    tab,
-    newMsg,
-    identity,
-    dark,
-    colors,
-    reset
-  ]);
-
-  const tabs: Tab[] = [
-    "Chats",
-    "Stories",
-    "Feed",
-    "Calls",
-    "Vault",
-    "Settings"
-  ];
+  })();
 
   return (
     <SafeAreaView
       style={[
         styles.safe,
-        { backgroundColor: colors.bg }
+        { backgroundColor: colors.bg },
       ]}
     >
       <StatusBar
-        barStyle={dark ? "light-content" : "dark-content"}
+        barStyle={
+          dark ? "light-content" : "dark-content"
+        }
       />
+
+      <TouchableOpacity
+        style={[
+          styles.identityButton,
+          {
+            backgroundColor: colors.card,
+            borderColor: colors.line,
+          },
+        ]}
+        onPress={() => setIdModal(true)}
+      >
+        <Text
+          style={[
+            styles.identityText,
+            { color: colors.brand },
+          ]}
+        >
+          {identity.id} · QR / Share
+        </Text>
+      </TouchableOpacity>
 
       {screen}
 
-      {!newMsg && (
-        <View
-          style={[
-            styles.tabs,
-            {
-              backgroundColor: colors.card,
-              borderTopColor: colors.line
-            }
-          ]}
-        >
-          {tabs.map(item => (
-            <TouchableOpacity
-              key={item}
-              style={styles.tab}
-              onPress={() => setTab(item)}
+      <View
+        style={[
+          styles.tabs,
+          {
+            backgroundColor: colors.card,
+            borderTopColor: colors.line,
+          },
+        ]}
+      >
+        {(
+          [
+            "Chats",
+            "Stories",
+            "Feed",
+            "Calls",
+            "Vault",
+            "Settings",
+          ] as Tab[]
+        ).map((item) => (
+          <TouchableOpacity
+            key={item}
+            style={styles.tab}
+            onPress={() => {
+              setNewMessage(false);
+              setTab(item);
+            }}
+          >
+            <Text
+              style={[
+                styles.tabText,
+                {
+                  color:
+                    tab === item
+                      ? colors.brand
+                      : colors.muted,
+                  fontWeight:
+                    tab === item ? "900" : "500",
+                },
+              ]}
             >
-              <Text
-                style={[
-                  styles.tabText,
-                  {
-                    color:
-                      tab === item
-                        ? colors.brand
-                        : colors.muted,
-                    fontWeight:
-                      tab === item
-                        ? "800"
-                        : "500"
-                  }
-                ]}
-              >
-                {item}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
+              {item}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      <IDModal
+        identity={identity}
+        colors={colors}
+        visible={idModal}
+        onClose={() => setIdModal(false)}
+      />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   safe: {
-    flex: 1
+    flex: 1,
   },
-
   flex: {
-    flex: 1
+    flex: 1,
   },
-
   header: {
-    padding: 16,
-    paddingTop: 10,
-    borderBottomWidth: 1
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
   },
-
-  headerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12
-  },
-
   title: {
-    fontSize: 22,
-    fontWeight: "800"
+    fontSize: 23,
+    fontWeight: "900",
   },
-
   subtitle: {
     fontSize: 12,
-    marginTop: 2
+    marginTop: 3,
   },
-
-  logo: {
-    width: 74,
-    height: 74,
-    borderRadius: 24,
+  identityButton: {
+    minHeight: 38,
+    borderBottomWidth: 1,
+    paddingHorizontal: 14,
     alignItems: "center",
     justifyContent: "center",
-    position: "relative",
-    borderWidth: 1
   },
-
-  logoN: {
-    fontSize: 42,
+  identityText: {
+    fontSize: 12,
     fontWeight: "900",
-    letterSpacing: -5
   },
-
-  lock: {
-    position: "absolute",
-    top: 18,
-    right: 17,
-    width: 22,
-    height: 22,
-    borderWidth: 3,
-    borderRadius: 6,
-    alignItems: "center"
-  },
-
-  lockBody: {
-    position: "absolute",
-    top: 8,
-    width: 17,
-    height: 12,
-    borderRadius: 3
-  },
-
-  empty: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 30
-  },
-
-  emptyTitle: {
-    fontSize: 23,
-    fontWeight: "800",
-    marginTop: 18,
-    textAlign: "center"
-  },
-
-  emptyBody: {
-    fontSize: 14,
-    textAlign: "center",
-    lineHeight: 21,
-    marginTop: 8,
-    maxWidth: 320
-  },
-
-  primary: {
-    borderRadius: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 18,
-    alignItems: "center",
-    marginTop: 12
-  },
-
-  primaryText: {
-    color: "#fff",
-    fontWeight: "800"
-  },
-
   form: {
     padding: 16,
-    gap: 12
+    gap: 12,
   },
-
-  label: {
-    fontSize: 13,
-    fontWeight: "800"
-  },
-
   input: {
     borderWidth: 1,
     borderRadius: 14,
     padding: 14,
-    fontSize: 16
-  },
-
-  messageInput: {
-    height: 120,
-    textAlignVertical: "top"
-  },
-
-  list: {
-    padding: 16,
-    gap: 12
-  },
-
-  chatCard: {
-    borderRadius: 16,
-    padding: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    borderWidth: 1
-  },
-
-  avatar: {
-    width: 44,
-    height: 44,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center"
-  },
-
-  avatarText: {
-    fontWeight: "900",
-    fontSize: 18
-  },
-
-  cardTitle: {
-    fontWeight: "800",
-    fontSize: 15
-  },
-
-  cardBody: {
-    fontSize: 13,
-    lineHeight: 19,
-    marginTop: 4
-  },
-
-  time: {
-    fontSize: 10
-  },
-
-  post: {
-    borderRadius: 18,
-    padding: 16,
-    borderWidth: 1
-  },
-
-  storyHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10
-  },
-
-  storyText: {
     fontSize: 16,
-    lineHeight: 23,
-    marginTop: 14
   },
-
-  like: {
-    marginTop: 14
+  messageInput: {
+    minHeight: 110,
+    textAlignVertical: "top",
   },
-
-  likeText: {
-    fontWeight: "800",
-    fontSize: 14
-  },
-
-  stat: {
-    borderRadius: 18,
-    padding: 16,
-    borderWidth: 1
-  },
-
-  statValue: {
-    fontSize: 26,
+  label: {
+    fontSize: 13,
     fontWeight: "900",
-    marginTop: 6
   },
-
-  setting: {
-    borderRadius: 16,
-    padding: 15,
-    borderWidth: 1
-  },
-
-  settingsFooter: {
-    gap: 10,
-    marginTop: 2
-  },
-
-  row: {
-    borderRadius: 16,
-    padding: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    borderWidth: 1
-  },
-
-  danger: {
-    borderWidth: 1,
+  primary: {
     borderRadius: 14,
     padding: 14,
-    alignItems: "center"
+    alignItems: "center",
   },
-
+  primaryText: {
+    color: "#fff",
+    fontWeight: "900",
+  },
+  secondary: {
+    borderWidth: 1,
+    borderColor: "#78909C",
+    borderRadius: 14,
+    padding: 13,
+    alignItems: "center",
+  },
+  secondaryText: {
+    fontWeight: "900",
+    color: "#42A5E5",
+  },
+  danger: {
+    borderWidth: 1,
+    borderColor: "#B42318",
+    borderRadius: 14,
+    padding: 14,
+    alignItems: "center",
+  },
   dangerText: {
-    fontWeight: "800"
+    color: "#B42318",
+    fontWeight: "900",
   },
-
+  list: {
+    padding: 16,
+    gap: 10,
+  },
+  card: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 14,
+  },
+  cardTitle: {
+    fontSize: 15,
+    fontWeight: "900",
+  },
+  cardBody: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginTop: 5,
+  },
+  time: {
+    fontSize: 10,
+    marginTop: 8,
+  },
+  emptyText: {
+    textAlign: "center",
+    padding: 40,
+    fontSize: 14,
+  },
   tabs: {
-    minHeight: 64,
+    height: 68,
+    flexDirection: "row",
+    alignItems: "stretch",
     borderTopWidth: 1,
-    flexDirection: "row"
+    borderTopColor: "#D9E2EC",
   },
-
   tab: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 2
+    minHeight: 68,
   },
-
   tabText: {
-    fontSize: 10
+    fontSize: 11,
+    fontWeight: "700",
   },
-
   fab: {
     position: "absolute",
     right: 18,
@@ -1307,12 +1626,124 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: "center",
     justifyContent: "center",
-    elevation: 5
+    elevation: 5,
   },
-
   fabText: {
     color: "#fff",
     fontSize: 30,
-    lineHeight: 30
-  }
+  },
+  contactChip: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 10,
+  },
+  contactName: {
+    fontWeight: "900",
+  },
+  likeButton: {
+    paddingTop: 12,
+  },
+  likeText: {
+    fontWeight: "900",
+  },
+  settingRow: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,.6)",
+    justifyContent: "flex-end",
+  },
+  modal: {
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 20,
+    gap: 12,
+  },
+  modalTitle: {
+    fontSize: 21,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+  qrBox: {
+    height: 220,
+    borderWidth: 1,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  qrFake: {
+    fontSize: 100,
+  },
+  qrId: {
+    fontWeight: "900",
+  },
+  close: {
+    textAlign: "center",
+    padding: 10,
+    fontWeight: "800",
+  },
+  scannerOverlay: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "flex-end",
+    padding: 30,
+  },
+  scannerClose: {
+    backgroundColor: "rgba(0,0,0,.7)",
+    padding: 14,
+    borderRadius: 14,
+  },
+  gate: {
+    flex: 1,
+    backgroundColor: "#08111A",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 30,
+    gap: 15,
+  },
+  gateTitle: {
+    color: "#fff",
+    fontSize: 28,
+    fontWeight: "900",
+  },
+  gateBody: {
+    color: "#9BAEBD",
+    textAlign: "center",
+    lineHeight: 21,
+  },
+  gateInput: {
+    width: "100%",
+    backgroundColor: "#101C27",
+    borderColor: "#263847",
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 15,
+    color: "#fff",
+    textAlign: "center",
+    fontSize: 20,
+    letterSpacing: 5,
+  },
+  gateButton: {
+    width: "100%",
+    backgroundColor: "#0C5A8D",
+    borderRadius: 14,
+    padding: 15,
+    alignItems: "center",
+  },
+  forgot: {
+    color: "#6CC4F5",
+    fontWeight: "900",
+    padding: 10,
+  },
+  statValue: {
+    fontSize: 25,
+    fontWeight: "900",
+    marginTop: 7,
+  },
 });

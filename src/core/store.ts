@@ -1,36 +1,45 @@
 import { useSyncExternalStore } from "react";
 import { readVault, saveVault, clearVault } from "./vault";
 
+export type MediaType = "image" | "video";
+
+export type Attachment = {
+  uri: string;
+  type: MediaType;
+  name?: string;
+  mimeType?: string;
+  width?: number;
+  height?: number;
+  duration?: number;
+};
+
 export type Message = {
-  id?: string;
+  id: string;
   peer: string;
   text: string;
   status: string;
-  createdAt?: string;
-  attachmentUri?: string;
-  attachmentType?: "image" | "video";
+  createdAt: string;
+  attachment?: Attachment;
 };
 
 export type Story = {
   id: string;
   authorId: string;
-  caption?: string;
-  mediaUri: string;
-  mediaType: "image" | "video";
+  caption: string;
+  media?: Attachment;
   createdAt: string;
   expiresAt: string;
-  seen?: boolean;
+  viewed: boolean;
 };
 
 export type FeedPost = {
   id: string;
   authorId: string;
-  caption?: string;
-  mediaUris: string[];
-  mediaTypes: ("image" | "video")[];
+  caption: string;
+  media?: Attachment[];
   createdAt: string;
   likes: number;
-  comments: number;
+  liked: boolean;
 };
 
 export type NexContact = {
@@ -40,16 +49,23 @@ export type NexContact = {
   online?: boolean;
 };
 
-type State = {
+type PersistedState = {
   messages: Message[];
   stories: Story[];
   feed: FeedPost[];
+};
+
+type State = PersistedState & {
   contacts: NexContact[];
   vaultBytes: number;
 };
 
 const initialContacts: NexContact[] = [
-  { id: "N-4827-9153-64", displayName: "NexChat Demo", online: true },
+  {
+    id: "N-4827-9153-64",
+    displayName: "NexChat Demo",
+    online: true,
+  },
 ];
 
 let state: State = {
@@ -61,31 +77,35 @@ let state: State = {
 };
 
 const listeners = new Set<() => void>();
-const emit = () => listeners.forEach((listener) => listener());
 
-async function persist(next: Partial<State>) {
+function emit() {
+  listeners.forEach((listener) => listener());
+}
+
+async function persist(next: Partial<PersistedState>) {
   state = { ...state, ...next };
 
-  await saveVault({
+  const payload: PersistedState = {
     messages: state.messages,
-    stories: state.stories,
+    stories: state.stories.filter(
+      (story) => new Date(story.expiresAt).getTime() > Date.now()
+    ),
     feed: state.feed,
-  });
+  };
+
+  await saveVault(payload);
 
   state = {
     ...state,
-    vaultBytes: JSON.stringify({
-      messages: state.messages,
-      stories: state.stories,
-      feed: state.feed,
-    }).length,
+    ...payload,
+    vaultBytes: JSON.stringify(payload).length,
   };
 
   emit();
 }
 
 export const useNexChatStore = () => {
-  const snap = useSyncExternalStore(
+  const snapshot = useSyncExternalStore(
     (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -95,19 +115,19 @@ export const useNexChatStore = () => {
   );
 
   return {
-    ...snap,
+    ...snapshot,
 
     hydrate: async () => {
-      const data = await readVault<{
-        messages?: Message[];
-        stories?: Story[];
-        feed?: FeedPost[];
-      }>();
+      const data = await readVault<PersistedState>();
+
+      const stories = (data?.stories || []).filter(
+        (story) => new Date(story.expiresAt).getTime() > Date.now()
+      );
 
       state = {
         ...state,
         messages: data?.messages || [],
-        stories: data?.stories || [],
+        stories,
         feed: data?.feed || [],
         vaultBytes: JSON.stringify(data || {}).length,
       };
@@ -115,62 +135,106 @@ export const useNexChatStore = () => {
       emit();
     },
 
-    addMessage: async (message: Message) =>
-      persist({
+    addMessage: async (
+      input: Omit<Message, "id" | "createdAt">
+    ) => {
+      await persist({
         messages: [
           ...state.messages,
           {
-            ...message,
-            id: message.id || `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            createdAt: message.createdAt || new Date().toISOString(),
-          },
-        ],
-      }),
-
-    addStory: async (story: Omit<Story, "id" | "createdAt" | "expiresAt">) => {
-      const createdAt = new Date();
-      const expiresAt = new Date(createdAt.getTime() + 24 * 60 * 60 * 1000);
-
-      await persist({
-        stories: [
-          ...state.stories,
-          {
-            ...story,
-            id: `story-${Date.now()}`,
-            createdAt: createdAt.toISOString(),
-            expiresAt: expiresAt.toISOString(),
+            ...input,
+            id: `msg-${Date.now()}-${Math.random()
+              .toString(36)
+              .slice(2, 8)}`,
+            createdAt: new Date().toISOString(),
           },
         ],
       });
     },
 
-    removeStory: async (id: string) =>
-      persist({
-        stories: state.stories.filter((story) => story.id !== id),
-      }),
+    addStory: async (
+      input: Omit<Story, "id" | "createdAt" | "expiresAt" | "viewed">
+    ) => {
+      const createdAt = new Date();
+      const expiresAt = new Date(
+        createdAt.getTime() + 24 * 60 * 60 * 1000
+      );
+
+      await persist({
+        stories: [
+          {
+            ...input,
+            id: `story-${Date.now()}`,
+            createdAt: createdAt.toISOString(),
+            expiresAt: expiresAt.toISOString(),
+            viewed: false,
+          },
+          ...state.stories,
+        ],
+      });
+    },
+
+    viewStory: async (id: string) => {
+      await persist({
+        stories: state.stories.map((story) =>
+          story.id === id ? { ...story, viewed: true } : story
+        ),
+      });
+    },
 
     addFeedPost: async (
-      post: Omit<FeedPost, "id" | "createdAt" | "likes" | "comments">
-    ) =>
-      persist({
+      input: Omit<FeedPost, "id" | "createdAt" | "likes" | "liked">
+    ) => {
+      await persist({
         feed: [
           {
-            ...post,
+            ...input,
             id: `post-${Date.now()}`,
             createdAt: new Date().toISOString(),
             likes: 0,
-            comments: 0,
+            liked: false,
           },
           ...state.feed,
         ],
-      }),
+      });
+    },
 
-    likeFeedPost: async (id: string) =>
-      persist({
+    toggleLike: async (id: string) => {
+      await persist({
         feed: state.feed.map((post) =>
-          post.id === id ? { ...post, likes: post.likes + 1 } : post
+          post.id === id
+            ? {
+                ...post,
+                liked: !post.liked,
+                likes: Math.max(
+                  0,
+                  post.likes + (post.liked ? -1 : 1)
+                ),
+              }
+            : post
         ),
-      }),
+      });
+    },
+
+    addContact: async (contact: NexContact) => {
+      if (state.contacts.some((item) => item.id === contact.id)) return;
+
+      state = {
+        ...state,
+        contacts: [...state.contacts, contact],
+      };
+
+      emit();
+    },
+
+    removeContact: async (id: string) => {
+      state = {
+        ...state,
+        contacts: state.contacts.filter((contact) => contact.id !== id),
+      };
+
+      emit();
+    },
 
     reset: async () => {
       await clearVault();
