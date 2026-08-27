@@ -2,92 +2,91 @@ import { useSyncExternalStore } from "react";
 import { readVault, saveVault, clearVault } from "./vault";
 
 export type Message = {
+  id?: string;
   peer: string;
   text: string;
   status: string;
   createdAt?: string;
+  attachmentUri?: string;
+  attachmentType?: "image" | "video";
 };
 
 export type Story = {
   id: string;
-  author: string;
-  text: string;
+  authorId: string;
+  caption?: string;
+  mediaUri: string;
+  mediaType: "image" | "video";
   createdAt: string;
   expiresAt: string;
-  viewed: boolean;
+  seen?: boolean;
 };
 
 export type FeedPost = {
   id: string;
-  author: string;
-  text: string;
+  authorId: string;
+  caption?: string;
+  mediaUris: string[];
+  mediaTypes: ("image" | "video")[];
   createdAt: string;
   likes: number;
-  liked: boolean;
+  comments: number;
 };
 
-type PersistedState = {
+export type NexContact = {
+  id: string;
+  displayName: string;
+  avatarUri?: string;
+  online?: boolean;
+};
+
+type State = {
   messages: Message[];
   stories: Story[];
   feed: FeedPost[];
-};
-
-type State = PersistedState & {
+  contacts: NexContact[];
   vaultBytes: number;
 };
 
-const starterFeed: FeedPost[] = [
-  {
-    id: "welcome",
-    author: "NexChat",
-    text: "Welcome to NexChat. Public discovery is separated from private conversations.",
-    createdAt: new Date().toISOString(),
-    likes: 0,
-    liked: false
-  },
-  {
-    id: "privacy",
-    author: "NexChat",
-    text: "Private messages belong in Chats. Feed content is a separate public surface.",
-    createdAt: new Date().toISOString(),
-    likes: 0,
-    liked: false
-  }
+const initialContacts: NexContact[] = [
+  { id: "N-4827-9153-64", displayName: "NexChat Demo", online: true },
 ];
 
 let state: State = {
   messages: [],
   stories: [],
-  feed: starterFeed,
-  vaultBytes: 0
+  feed: [],
+  contacts: initialContacts,
+  vaultBytes: 0,
 };
 
 const listeners = new Set<() => void>();
+const emit = () => listeners.forEach((listener) => listener());
 
-const emit = () => listeners.forEach(listener => listener());
+async function persist(next: Partial<State>) {
+  state = { ...state, ...next };
 
-async function persist(next: PersistedState) {
-  await saveVault(next);
+  await saveVault({
+    messages: state.messages,
+    stories: state.stories,
+    feed: state.feed,
+  });
 
   state = {
-    ...next,
-    vaultBytes: JSON.stringify(next).length
+    ...state,
+    vaultBytes: JSON.stringify({
+      messages: state.messages,
+      stories: state.stories,
+      feed: state.feed,
+    }).length,
   };
 
   emit();
 }
 
-function removeExpiredStories(stories: Story[]) {
-  const now = Date.now();
-
-  return stories.filter(
-    story => new Date(story.expiresAt).getTime() > now
-  );
-}
-
 export const useNexChatStore = () => {
   const snap = useSyncExternalStore(
-    listener => {
+    (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
@@ -99,115 +98,79 @@ export const useNexChatStore = () => {
     ...snap,
 
     hydrate: async () => {
-      const data = await readVault<Partial<PersistedState>>();
-
-      const stories = removeExpiredStories(data?.stories || []);
-
-      const messages = data?.messages || [];
-
-      const feed =
-        data?.feed && data.feed.length > 0
-          ? data.feed
-          : starterFeed;
+      const data = await readVault<{
+        messages?: Message[];
+        stories?: Story[];
+        feed?: FeedPost[];
+      }>();
 
       state = {
-        messages,
-        stories,
-        feed,
-        vaultBytes: JSON.stringify({
-          messages,
-          stories,
-          feed
-        }).length
+        ...state,
+        messages: data?.messages || [],
+        stories: data?.stories || [],
+        feed: data?.feed || [],
+        vaultBytes: JSON.stringify(data || {}).length,
       };
 
       emit();
     },
 
-    addMessage: async (message: Message) => {
-      await persist({
+    addMessage: async (message: Message) =>
+      persist({
         messages: [
           ...state.messages,
           {
             ...message,
-            createdAt: new Date().toISOString()
-          }
+            id: message.id || `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            createdAt: message.createdAt || new Date().toISOString(),
+          },
         ],
-        stories: state.stories,
-        feed: state.feed
-      });
-    },
+      }),
 
-    addStory: async (author: string, text: string) => {
-      const now = new Date();
-      const expires = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-
-      const story: Story = {
-        id: `${Date.now()}-${Math.random()}`,
-        author,
-        text,
-        createdAt: now.toISOString(),
-        expiresAt: expires.toISOString(),
-        viewed: false
-      };
+    addStory: async (story: Omit<Story, "id" | "createdAt" | "expiresAt">) => {
+      const createdAt = new Date();
+      const expiresAt = new Date(createdAt.getTime() + 24 * 60 * 60 * 1000);
 
       await persist({
-        messages: state.messages,
-        stories: [story, ...removeExpiredStories(state.stories)],
-        feed: state.feed
+        stories: [
+          ...state.stories,
+          {
+            ...story,
+            id: `story-${Date.now()}`,
+            createdAt: createdAt.toISOString(),
+            expiresAt: expiresAt.toISOString(),
+          },
+        ],
       });
     },
 
-    viewStory: async (id: string) => {
-      const stories = state.stories.map(story =>
-        story.id === id
-          ? { ...story, viewed: true }
-          : story
-      );
+    removeStory: async (id: string) =>
+      persist({
+        stories: state.stories.filter((story) => story.id !== id),
+      }),
 
-      await persist({
-        messages: state.messages,
-        stories,
-        feed: state.feed
-      });
-    },
+    addFeedPost: async (
+      post: Omit<FeedPost, "id" | "createdAt" | "likes" | "comments">
+    ) =>
+      persist({
+        feed: [
+          {
+            ...post,
+            id: `post-${Date.now()}`,
+            createdAt: new Date().toISOString(),
+            likes: 0,
+            comments: 0,
+          },
+          ...state.feed,
+        ],
+      }),
 
-    addFeedPost: async (author: string, text: string) => {
-      const post: FeedPost = {
-        id: `${Date.now()}-${Math.random()}`,
-        author,
-        text,
-        createdAt: new Date().toISOString(),
-        likes: 0,
-        liked: false
-      };
-
-      await persist({
-        messages: state.messages,
-        stories: state.stories,
-        feed: [post, ...state.feed]
-      });
-    },
-
-    toggleLike: async (id: string) => {
-      const feed = state.feed.map(post => {
-        if (post.id !== id) return post;
-
-        return {
-          ...post,
-          liked: !post.liked,
-          likes: post.liked
-            ? Math.max(0, post.likes - 1)
-            : post.likes + 1
-        };
-      });
-
-      await persist({
-        messages: state.messages,
-        stories: state.stories,
-        feed
-      });
-    },
+    likeFeedPost: async (id: string) =>
+      persist({
+        feed: state.feed.map((post) =>
+          post.id === id ? { ...post, likes: post.likes + 1 } : post
+        ),
+      }),
 
     reset: async () => {
       await clearVault();
@@ -215,11 +178,12 @@ export const useNexChatStore = () => {
       state = {
         messages: [],
         stories: [],
-        feed: starterFeed,
-        vaultBytes: 0
+        feed: [],
+        contacts: initialContacts,
+        vaultBytes: 0,
       };
 
       emit();
-    }
+    },
   };
 };
