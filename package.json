@@ -1,8 +1,7 @@
 {
-  "name": "nexchat-mobile",
-  "version": "0.1.0",
-  "private": true,
-  "main": "node_modules/expo/AppEntry.js",
+  "name": "nexchat-app",
+  "version": "1.0.0",
+  "main": "index.js",
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",
@@ -10,19 +9,19 @@
     "web": "expo start --web"
   },
   "dependencies": {
-    "@react-native-async-storage/async-storage": "^2.2.0",
-    "base64-js": "^1.5.1",
-    "expo": "~57.0.0",
-    "expo-crypto": "~15.0.0",
-    "expo-local-authentication": "~17.0.0",
-    "expo-secure-store": "~15.0.0",
-    "react": "19.2.3",
-    "react-native": "0.86.0",
-    "tweetnacl": "^1.0.3"
+    "expo": "~54.0.36",
+    "expo-constants": "~18.0.14",
+    "expo-crypto": "~15.0.9",
+    "expo-device": "~8.0.10",
+    "expo-file-system": "~19.0.24",
+    "expo-linking": "~8.0.12",
+    "expo-local-authentication": "~17.0.9",
+    "expo-secure-store": "~15.0.8",
+    "expo-sharing": "~14.0.8",
+    "expo-sqlite": "~16.0.10",
+    "expo-status-bar": "~3.0.9",
+    "react": "19.1.0",
+    "react-native": "0.81.5"
   },
-  "devDependencies": {
-    "@types/react": "~19.2.0",
-    "@types/react-native": "~0.74.0",
-    "typescript": "~5.9.2"
-  }
+  "private": true
 }
