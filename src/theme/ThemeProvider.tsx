@@ -1,7 +1,7 @@
 import React, { createContext, useContext } from "react";
 import { themes } from "./theme";
 
-export type ThemeMode = "light" | "dark" | "black";
+export type ThemeMode = "light" | "dark";
 export type NexChatTheme = (typeof themes)[ThemeMode];
 
 const Ctx = createContext<NexChatTheme>(themes.light);

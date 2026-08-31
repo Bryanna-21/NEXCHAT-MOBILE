@@ -1,15 +1,21 @@
 import React,{useEffect,useMemo,useState} from "react";
-import {Alert,FlatList,Modal,SafeAreaView,ScrollView,Share,StatusBar,StyleSheet,Switch,Text,TextInput,TouchableOpacity,View} from "react-native";
+import {Alert,FlatList,Image,Modal,SafeAreaView,ScrollView,Share,StatusBar,StyleSheet,Switch,Text,TextInput,TouchableOpacity,View} from "react-native";
 import * as Clipboard from "expo-clipboard";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import {initIdentity,getIdentity,Identity,updateIdentity} from "./src/core/identity";
 import {initVault,verifyVault,getVaultSize} from "./src/core/vault";
-import {useNexChatStore,Attachment,Conversation,NexContact,Message} from "./src/core/store";
+import {useNexChatStore,Attachment,Conversation,NexContact,Message,MessageStatus} from "./src/core/store";
 import {MediaPicker} from "./src/components/MediaPicker";
+import {QRScanner} from "./src/components/QRScanner";
+import {pickProfilePhoto} from "./src/core/media";
+import {createContactQR} from "./src/core/qr";
+import QRCode from "react-native-qrcode-svg";
 import {MediaPreview} from "./src/components/MediaPreview";
 import {themes} from "./src/theme/theme";
+import {StoriesScreen} from "./src/components/StoriesScreen";
+import {PasscodeManager} from "./src/components/PasscodeManager";
 
 type Tab="Chats"|"Stories"|"Feed"|"Calls"|"Settings";
 type Screen={name:"home"}|{name:"chat";peerId:string}|{name:"new"}|{name:"contact";peerId:string}|{name:"settings"}|{name:"settingsSection";section:string};
@@ -19,32 +25,670 @@ function Button({label,onPress,secondary=false,danger=false}:{label:string;onPre
 function Row({icon:ic,title,subtitle,onPress,right}:{icon:string;title:string;subtitle?:string;onPress?:()=>void;right?:React.ReactNode}){return <TouchableOpacity disabled={!onPress} onPress={onPress} style={s.row}><Text style={s.rowIcon}>{ic}</Text><View style={{flex:1}}><Text style={s.rowTitle}>{title}</Text>{subtitle&&<Text style={s.rowSub}>{subtitle}</Text>}</View>{right||<Text style={s.chevron}>›</Text>}</TouchableOpacity>}
 function Header({title,subtitle,onBack,onInfo,onCall,onVideo,theme}:{title:string;subtitle?:string;onBack?:()=>void;onInfo?:()=>void;onCall?:()=>void;onVideo?:()=>void;theme:any}){return <View style={[s.header,{backgroundColor:theme.card,borderBottomColor:theme.line}]}><TouchableOpacity onPress={onBack} disabled={!onBack} style={s.headBack}><Text style={{color:theme.ink,fontSize:28}}>{onBack?"‹":""}</Text></TouchableOpacity><View style={{flex:1}}><Text style={[s.headTitle,{color:theme.ink}]}>{title}</Text>{subtitle&&<Text style={[s.headSub,{color:theme.muted}]}>{subtitle}</Text>}</View>{onCall&&<TouchableOpacity onPress={onCall} style={s.headAction}>{icon("📞")}</TouchableOpacity>}{onVideo&&<TouchableOpacity onPress={onVideo} style={s.headAction}>{icon("🎥")}</TouchableOpacity>}{onInfo&&<TouchableOpacity onPress={onInfo} style={s.headAction}>{icon("ⓘ")}</TouchableOpacity>}</View>}
 
-function ChatList({theme,onOpen,onNew}:{theme:any;onOpen:(id:string)=>void;onNew:()=>void}){const st=useNexChatStore();const sorted=[...st.conversations].filter(c=>!c.archived).sort((a,b)=>Number(b.pinned)-Number(a.pinned)||new Date(b.messages.at(-1)?.createdAt||0).getTime()-new Date(a.messages.at(-1)?.createdAt||0).getTime());return <View style={s.flex}><Header title="NexChat" subtitle="Private • local-first" theme={theme}/><FlatList data={sorted} keyExtractor={x=>x.id} contentContainerStyle={{padding:12,paddingBottom:100}} ListEmptyComponent={<View style={s.empty}><Text style={{fontSize:40}}>◌</Text><Text style={{fontWeight:"800",fontSize:18,color:theme.ink}}>No chats yet</Text><Text style={{color:theme.muted,textAlign:"center"}}>Start one conversation. NexChat will reuse it instead of creating duplicate entries.</Text></View>} renderItem={({item})=>{const c=st.contacts.find(x=>x.id===item.peerId);const last=item.messages.at(-1);return <TouchableOpacity onPress={()=>onOpen(item.peerId)} style={[s.chatRow,{backgroundColor:theme.card,borderColor:theme.line}]}><View style={[s.avatar,{backgroundColor:theme.brand}]}><Text style={{color:"white",fontWeight:"900"}}>{(c?.displayName||item.peerId).slice(0,1).toUpperCase()}</Text></View><View style={{flex:1}}><View style={{flexDirection:"row",justifyContent:"space-between"}}><Text style={[s.chatName,{color:theme.ink}]}>{c?.displayName||item.peerId}</Text><Text style={{color:theme.muted,fontSize:11}}>{last?new Date(last.createdAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}):""}</Text></View><Text numberOfLines={1} style={{color:theme.muted}}>{last?.deletedForEveryone||last?.deletedForMe?"Message deleted":last?.text||last?.attachment?.name||"No messages"}</Text><Text style={{color:theme.muted,fontSize:10}}>{item.pinned?"📌 ":""}{item.muted?"🔕 ":""}{item.locked?"🔒":""}</Text></View></TouchableOpacity>}}/><TouchableOpacity onPress={onNew} style={[s.fab,{backgroundColor:theme.brand}]}><Text style={{color:"white",fontSize:28}}>＋</Text></TouchableOpacity></View>}
+function ChatList({theme,onOpen,onNew}:{theme:any;onOpen:(id:string)=>void;onNew:()=>void}){const st=useNexChatStore();const sorted=[...st.conversations].filter(c=>!c.archived).sort((a,b)=>Number(b.pinned)-Number(a.pinned)||new Date(b.messages.at(-1)?.createdAt||0).getTime()-new Date(a.messages.at(-1)?.createdAt||0).getTime());return <View style={s.flex}><Header title="NexChat" subtitle="Private • local-first" theme={theme}/><FlatList data={sorted} keyExtractor={x=>x.id} contentContainerStyle={{padding:12,paddingBottom:100}} ListEmptyComponent={<View style={s.empty}><Text style={{fontSize:40}}>◌</Text><Text style={{fontWeight:"800",fontSize:18,color:theme.ink}}>No chats yet</Text><Text style={{color:theme.muted,textAlign:"center"}}>Start one conversation. NexChat will reuse it instead of creating duplicate entries.</Text></View>} renderItem={({item})=>{const c=st.contacts.find(x=>x.id===item.peerId);const last=item.messages.at(-1);return <TouchableOpacity onPress={()=>onOpen(item.peerId)} style={[s.chatRow,{backgroundColor:theme.card,borderColor:theme.line}]}><View
+  style={[
+    s.avatar,
+    {
+      backgroundColor: theme.brand,
+      overflow: "hidden",
+    },
+  ]}
+>
+  {c?.avatarUri ? (
+    <Image
+      source={{ uri: c.avatarUri }}
+      style={{
+        width: 48,
+        height: 48,
+      }}
+    />
+  ) : (
+    <Text
+      style={{
+        color: "white",
+        fontWeight: "900",
+      }}
+    >
+      {(c?.displayName || item.peerId)
+        .slice(0, 1)
+        .toUpperCase()}
+    </Text>
+  )}
+</View><View style={{flex:1}}><View style={{flexDirection:"row",justifyContent:"space-between"}}><Text style={[s.chatName,{color:theme.ink}]}>{c?.displayName||item.peerId}</Text><Text style={{color:theme.muted,fontSize:11}}>{last?new Date(last.createdAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}):""}</Text></View><Text numberOfLines={1} style={{color:theme.muted}}>{last?.deletedForEveryone||last?.deletedForMe?"Message deleted":last?.text||last?.attachment?.name||"No messages"}</Text><Text style={{color:theme.muted,fontSize:10}}>{item.pinned?"📌 ":""}{item.muted?"🔕 ":""}{item.locked?"🔒":""}</Text></View></TouchableOpacity>}}/><TouchableOpacity onPress={onNew} style={[s.fab,{backgroundColor:theme.brand}]}><Text style={{color:"white",fontSize:28}}>＋</Text></TouchableOpacity></View>}
 
-function NewMessage({theme,onBack,onOpen}:{theme:any;onBack:()=>void;onOpen:(id:string)=>void}){const st=useNexChatStore();const [id,setId]=useState("");const [text,setText]=useState("");const [media,setMedia]=useState<Attachment[]>([]);const [mode,setMode]=useState<"normal"|"viewOnce">("normal");const send=async()=>{const peer=id.trim();if(!peer)return Alert.alert("Recipient required","Enter a NexChat ID or choose a contact.");const existing=st.contacts.find(c=>c.id.toLowerCase()===peer.toLowerCase());const realId=existing?.id||peer;if(media.length===0){await st.sendMessage(realId,text.trim(),undefined,{viewOnce:mode==="viewOnce"});}else{for(const item of media) await st.sendMessage(realId,text.trim(),item,{viewOnce:mode==="viewOnce"});}setText("");setMedia([]);onOpen(realId)};return <View style={s.flex}><Header title="New message" subtitle="One contact = one conversation" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Text style={[s.label,{color:theme.ink}]}>Contacts</Text><ScrollView horizontal showsHorizontalScrollIndicator={false}>{st.contacts.map(c=><TouchableOpacity key={c.id} onPress={()=>setId(c.id)} style={[s.chip,{borderColor:theme.line,backgroundColor:theme.card}]}><Text style={{fontWeight:"800",color:theme.ink}}>{c.displayName}</Text><Text style={{fontSize:10,color:theme.muted}}>{c.id}</Text></TouchableOpacity>)}</ScrollView><Text style={[s.label,{color:theme.ink}]}>NexChat ID</Text><TextInput value={id} onChangeText={setId} autoCapitalize="characters" placeholder="N-1234-5678-90" placeholderTextColor={theme.muted} style={[s.input,{color:theme.ink,borderColor:theme.line,backgroundColor:theme.card}]}/><Text style={[s.label,{color:theme.ink}]}>Message</Text><TextInput value={text} onChangeText={setText} multiline placeholder="Write a message" placeholderTextColor={theme.muted} style={[s.input,{minHeight:120,color:theme.ink,borderColor:theme.line,backgroundColor:theme.card,textAlignVertical:"top"}]}/><MediaPicker onSelected={setMedia}/>{media.length>0&&<ScrollView horizontal>{media.map((m,i)=><MediaPreview key={m.id} media={m} onRemove={()=>setMedia(media.filter((_,x)=>x!==i))}/>)}</ScrollView>}<TouchableOpacity onPress={()=>setMode(mode==="normal"?"viewOnce":"normal")} style={s.toggleLine}><Text style={{color:theme.ink,fontWeight:"800"}}>View once</Text><Switch value={mode==="viewOnce"} onValueChange={v=>setMode(v?"viewOnce":"normal")}/></TouchableOpacity><Button label="Send & open conversation" onPress={send}/></ScrollView></View>}
+function NewMessage({
+  theme,
+  onBack,
+  onOpen,
+}: {
+  theme: any;
+  onBack: () => void;
+  onOpen: (id: string) => void;
+}) {
+  const st = useNexChatStore();
 
-function MessageBubble({m,theme,onEdit,onDelete,onViewOnce}:{m:Message;theme:any;onEdit:()=>void;onDelete:()=>void;onViewOnce:()=>void}){const mine=m.sender==="me";const hidden=m.viewOnce&&m.viewedAt;return <TouchableOpacity onLongPress={()=>Alert.alert("Message","Choose an action",[{text:"Edit",onPress:onEdit},{text:"Delete",onPress:onDelete},{text:"Cancel",style:"cancel"}])} style={[s.bubble,{alignSelf:mine?"flex-end":"flex-start",backgroundColor:mine?theme.bubbleMe:theme.bubbleThem,borderColor:theme.line}]}>{m.deletedForEveryone||m.deletedForMe?<Text style={{fontStyle:"italic",color:theme.muted}}>This message was deleted</Text>:hidden?<TouchableOpacity onPress={onViewOnce}><Text style={{fontWeight:"800",color:theme.ink}}>👁 View once • tap to open</Text></TouchableOpacity>:<><>{m.attachment&&<MediaPreview media={m.attachment}/>}</><Text style={{color:theme.ink,fontSize:16}}>{m.text}</Text><Text style={{fontSize:10,color:theme.muted,alignSelf:"flex-end"}}>{m.editedAt?"edited • ":""}{new Date(m.createdAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})} {mine?`• ${m.status}`:""}</Text></>}</TouchableOpacity>}
+  const [id, setId] = useState("");
+  const [text, setText] = useState("");
+  const [media, setMedia] = useState<Attachment[]>([]);
+  const [mode, setMode] = useState<"normal" | "viewOnce">("normal");
+  const [scannerVisible, setScannerVisible] = useState(false);
+
+  const addScannedContact = async (contact: {
+    id: string;
+    displayName: string;
+    username?: string;
+    avatarUri?: string;
+  }) => {
+    if (contact.id === (await getIdentity()).id) {
+      Alert.alert(
+        "That's your own QR code",
+        "You cannot start a conversation with yourself."
+      );
+      return;
+    }
+
+    const existing = st.contacts.find(
+      (c) => c.id.toLowerCase() === contact.id.toLowerCase()
+    );
+
+    if (!existing) {
+      await st.addContact({
+        id: contact.id,
+        displayName: contact.displayName,
+        username: contact.username,
+        avatarUri: contact.avatarUri,
+        online: false,
+      });
+    }
+
+    setId(contact.id);
+
+    Alert.alert(
+      "Contact added",
+      `${contact.displayName} has been added to your NexChat contacts.`,
+      [
+        {
+          text: "Open chat",
+          onPress: () => onOpen(contact.id),
+        },
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+      ]
+    );
+  };
+
+  const send = async () => {
+    const peer = id.trim();
+
+    if (!peer) {
+      Alert.alert(
+        "Recipient required",
+        "Enter a NexChat ID or scan a contact QR code."
+      );
+      return;
+    }
+
+    const existing = st.contacts.find(
+      (c) => c.id.toLowerCase() === peer.toLowerCase()
+    );
+
+    const realId = existing?.id || peer;
+
+    if (media.length === 0) {
+      await st.sendMessage(
+        realId,
+        text.trim(),
+        undefined,
+        {
+          viewOnce: mode === "viewOnce",
+        }
+      );
+    } else {
+      for (const item of media) {
+        await st.sendMessage(
+          realId,
+          text.trim(),
+          item,
+          {
+            viewOnce: mode === "viewOnce",
+          }
+        );
+      }
+    }
+
+    setText("");
+    setMedia([]);
+
+    onOpen(realId);
+  };
+
+  return (
+    <View style={s.flex}>
+      <Header
+        title="New message"
+        subtitle="One contact = one conversation"
+        onBack={onBack}
+        theme={theme}
+      />
+
+      <ScrollView contentContainerStyle={s.form}>
+        <Button
+          label="▣  Scan NexChat QR"
+          onPress={() => setScannerVisible(true)}
+        />
+
+        <Text
+          style={[
+            s.label,
+            { color: theme.ink },
+          ]}
+        >
+          Contacts
+        </Text>
+
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+        >
+          {st.contacts.map((c) => (
+            <TouchableOpacity
+              key={c.id}
+              onPress={() => setId(c.id)}
+              style={[
+                s.chip,
+                {
+                  borderColor: theme.line,
+                  backgroundColor: theme.card,
+                },
+              ]}
+            >
+              <Text
+                style={{
+                  fontWeight: "800",
+                  color: theme.ink,
+                }}
+              >
+                {c.displayName}
+              </Text>
+
+              <Text
+                style={{
+                  fontSize: 10,
+                  color: theme.muted,
+                }}
+              >
+                {c.id}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+
+        <Text
+          style={[
+            s.label,
+            { color: theme.ink },
+          ]}
+        >
+          NexChat ID
+        </Text>
+
+        <TextInput
+          value={id}
+          onChangeText={setId}
+          autoCapitalize="characters"
+          placeholder="N-1234-5678-90"
+          placeholderTextColor={theme.muted}
+          style={[
+            s.input,
+            {
+              color: theme.ink,
+              borderColor: theme.line,
+              backgroundColor: theme.card,
+            },
+          ]}
+        />
+
+        <Text
+          style={[
+            s.label,
+            { color: theme.ink },
+          ]}
+        >
+          Message
+        </Text>
+
+        <TextInput
+          value={text}
+          onChangeText={setText}
+          multiline
+          placeholder="Write a message"
+          placeholderTextColor={theme.muted}
+          style={[
+            s.input,
+            {
+              minHeight: 120,
+              color: theme.ink,
+              borderColor: theme.line,
+              backgroundColor: theme.card,
+              textAlignVertical: "top",
+            },
+          ]}
+        />
+
+        <MediaPicker onSelected={setMedia} />
+
+        {media.length > 0 && (
+          <ScrollView horizontal>
+            {media.map((m, i) => (
+              <MediaPreview
+                key={m.id}
+                media={m}
+                onRemove={() =>
+                  setMedia(
+                    media.filter((_, x) => x !== i)
+                  )
+                }
+              />
+            ))}
+          </ScrollView>
+        )}
+
+        <TouchableOpacity
+          onPress={() =>
+            setMode(
+              mode === "normal"
+                ? "viewOnce"
+                : "normal"
+            )
+          }
+          style={s.toggleLine}
+        >
+          <Text
+            style={{
+              color: theme.ink,
+              fontWeight: "800",
+            }}
+          >
+            View once
+          </Text>
+
+          <Switch
+            value={mode === "viewOnce"}
+            onValueChange={(v) =>
+              setMode(v ? "viewOnce" : "normal")
+            }
+          />
+        </TouchableOpacity>
+
+        <Button
+          label="Send & open conversation"
+          onPress={send}
+        />
+      </ScrollView>
+
+      <QRScanner
+        visible={scannerVisible}
+        onClose={() => setScannerVisible(false)}
+        onContact={addScannedContact}
+      />
+    </View>
+  );
+}
+
+function StatusTicks({status,theme}:{status:MessageStatus;theme:any}){if(status==="failed")return <Text style={{fontSize:11,color:theme.danger}}>⚠</Text>;if(status==="sending")return <Text style={{fontSize:11,color:theme.muted}}>🕒</Text>;if(status==="sent")return <Text style={{fontSize:11,color:theme.muted}}>✓</Text>;if(status==="delivered")return <Text style={{fontSize:11,color:theme.muted}}>✓✓</Text>;return <Text style={{fontSize:11,color:theme.brand}}>✓✓</Text>;}
+function MessageBubble({m,theme,onEdit,onDelete,onViewOnce}:{m:Message;theme:any;onEdit:()=>void;onDelete:()=>void;onViewOnce:()=>void}){const mine=m.sender==="me";const hidden=m.viewOnce&&m.viewedAt;return <TouchableOpacity onLongPress={()=>Alert.alert("Message","Choose an action",[{text:"Edit",onPress:onEdit},{text:"Delete",onPress:onDelete},{text:"Cancel",style:"cancel"}])} style={[s.bubble,{alignSelf:mine?"flex-end":"flex-start",backgroundColor:mine?theme.bubbleMe:theme.bubbleThem,borderColor:theme.line}]}>{m.deletedForEveryone||m.deletedForMe?<Text style={{fontStyle:"italic",color:theme.muted}}>This message was deleted</Text>:hidden?<TouchableOpacity onPress={onViewOnce}><Text style={{fontWeight:"800",color:theme.ink}}>👁 View once • tap to open</Text></TouchableOpacity>:<><>{m.attachment&&<MediaPreview media={m.attachment}/>}</><Text style={{color:theme.ink,fontSize:16}}>{m.text}</Text><View style={{flexDirection:"row",alignItems:"center",alignSelf:"flex-end",gap:4}}><Text style={{fontSize:10,color:theme.muted}}>{m.editedAt?"edited • ":""}{new Date(m.createdAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</Text>{mine&&<StatusTicks status={m.status} theme={theme}/>}</View></>}</TouchableOpacity>}
 
 function Chat({peerId,theme,onBack,onInfo,onCall,onVideo}:{peerId:string;theme:any;onBack:()=>void;onInfo:()=>void;onCall:()=>void;onVideo:()=>void}){const st=useNexChatStore();const c=st.conversations.find(x=>x.peerId===peerId);const contact=st.contacts.find(x=>x.id===peerId);const [text,setText]=useState("");const [media,setMedia]=useState<Attachment[]>([]);const [edit,setEdit]=useState<string|null>(null);const [editText,setEditText]=useState("");const send=async()=>{if(!text.trim()&&!media.length)return;if(media.length===0){await st.sendMessage(peerId,text.trim());}else{for(const item of media) await st.sendMessage(peerId,text.trim(),item);}setText("");setMedia([])};return <View style={s.flex}><Header title={contact?.displayName||peerId} subtitle={contact?.online?"online":"offline"} onBack={onBack} onInfo={onInfo} onCall={onCall} onVideo={onVideo} theme={theme}/><View style={[s.encryptedBar,{backgroundColor:theme.card,borderBottomColor:theme.line}]}><Text style={{fontSize:12,color:theme.muted}}>🔐 End-to-end encrypted • Local queue ready</Text></View><FlatList inverted data={[...(c?.messages||[])].filter(m=>!m.expiresAt||new Date(m.expiresAt).getTime()>Date.now()).reverse()} keyExtractor={m=>m.id} contentContainerStyle={{padding:12,gap:6}} renderItem={({item})=><MessageBubble m={item} theme={theme} onEdit={()=>{setEdit(item.id);setEditText(item.text)}} onDelete={()=>Alert.alert("Delete message","Delete for everyone or only for you?",[{text:"For everyone",onPress:()=>st.deleteMessage(item.id,true)},{text:"For me",onPress:()=>st.deleteMessage(item.id,false)},{text:"Cancel",style:"cancel"}])} onViewOnce={()=>st.markViewOnce(item.id)}/>} ListEmptyComponent={<View style={s.empty}><Text style={{color:theme.muted}}>Start the conversation.</Text></View>}/><View style={[s.composer,{backgroundColor:theme.card,borderTopColor:theme.line}]}>{media.length>0&&<ScrollView horizontal>{media.map((m,i)=><MediaPreview key={m.id} media={m} onRemove={()=>setMedia(media.filter((_,x)=>x!==i))}/>)}</ScrollView>}<View style={{flexDirection:"row",alignItems:"flex-end",gap:8}}><TouchableOpacity onPress={()=>Alert.alert("Attachments","Choose what to send",[{text:"Photos / Videos",onPress:async()=>setMedia(await import("./src/core/media").then(x=>x.pickMedia(true)))},{text:"Cancel",style:"cancel"}])}><Text style={{fontSize:25}}>＋</Text></TouchableOpacity><TextInput value={text} onChangeText={setText} multiline placeholder="Message" placeholderTextColor={theme.muted} style={[s.messageInput,{color:theme.ink,borderColor:theme.line,backgroundColor:theme.bg}]}/><TouchableOpacity onPress={send} style={[s.send,{backgroundColor:theme.brand}]}><Text style={{color:"white",fontWeight:"900"}}>➤</Text></TouchableOpacity></View></View>{edit&&<Modal transparent visible onRequestClose={()=>setEdit(null)}><View style={s.overlay}><View style={[s.dialog,{backgroundColor:theme.card}]}><Text style={[s.dialogTitle,{color:theme.ink}]}>Edit message</Text><TextInput value={editText} onChangeText={setEditText} style={[s.input,{color:theme.ink,borderColor:theme.line}]}/><Button label="Save edit" onPress={async()=>{await st.editMessage(edit,editText);setEdit(null)}}/><Button label="Cancel" secondary onPress={()=>setEdit(null)}/></View></View></Modal>}</View>}
 
-function ContactInfo({peerId,theme,onBack,onCall,onVideo}:{peerId:string;theme:any;onBack:()=>void;onCall:()=>void;onVideo:()=>void}){const st=useNexChatStore();const c=st.contacts.find(x=>x.id===peerId);const conv=st.conversations.find(x=>x.peerId===peerId);const media=(conv?.messages||[]).map(m=>m.attachment).filter(Boolean) as Attachment[];const links=(conv?.messages||[]).filter(m=>/https?:\/\//.test(m.text));return <View style={s.flex}><Header title="Contact info" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={{paddingBottom:40}}><View style={s.profileHead}><View style={[s.bigAvatar,{backgroundColor:theme.brand}]}><Text style={{color:"white",fontSize:32,fontWeight:"900"}}>{(c?.displayName||peerId).slice(0,1)}</Text></View><Text style={[s.profileName,{color:theme.ink}]}>{c?.displayName||peerId}</Text><Text style={{color:theme.muted}}>@{c?.username||"nexchat"}</Text><Text style={{color:theme.muted}}>{peerId}</Text><View style={{flexDirection:"row",gap:12,marginTop:14}}><Button label="📞 Voice" onPress={onCall}/><Button label="🎥 Video" onPress={onVideo}/></View></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="🔐" title="Encryption" subtitle="End-to-end encrypted"/><Row icon="🔔" title="Notifications" subtitle={conv?.muted?"Muted":"On"}/><Row icon="⏱" title="Disappearing messages" subtitle={conv?.disappearingSeconds?`${conv.disappearingSeconds}s`:"Off"} onPress={()=>Alert.alert("Disappearing messages","Choose a timer",[{text:"Off",onPress:()=>st.setConversation(peerId,{disappearingSeconds:0})},{text:"24 hours",onPress:()=>st.setConversation(peerId,{disappearingSeconds:86400})},{text:"7 days",onPress:()=>st.setConversation(peerId,{disappearingSeconds:604800})},{text:"Cancel",style:"cancel"}])}/><Row icon="👁" title="View-once media" subtitle="Available per message"/><Row icon="🎨" title="Chat theme" subtitle={conv?.theme||"Global theme"} onPress={()=>Alert.alert("Chat theme","Choose",[{text:"System",onPress:()=>st.setConversation(peerId,{theme:"system"})},{text:"Light",onPress:()=>st.setConversation(peerId,{theme:"light"})},{text:"Dark",onPress:()=>st.setConversation(peerId,{theme:"dark"})},{text:"Black",onPress:()=>st.setConversation(peerId,{theme:"black"})}])}/><Row icon="📌" title="Pin chat" right={<Switch value={!!conv?.pinned} onValueChange={v=>st.pinConversation(peerId,v)}/>} /><Row icon="📦" title="Archive chat" right={<Switch value={!!conv?.archived} onValueChange={v=>st.archiveConversation(peerId,v)}/>} /></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Text style={[s.sectionTitle,{color:theme.ink}]}>Shared media</Text><View style={{flexDirection:"row",flexWrap:"wrap"}}>{media.slice(-12).map(m=><MediaPreview key={m.id} media={m}/>)}</View>{media.length>0&&<Text style={{color:theme.muted,marginTop:6}}>{media.length} attachment(s) • retrievable from this chat</Text>}<Row icon="🔗" title="Links" subtitle={`${links.length} shared link(s)`}/><Row icon="📄" title="Files" subtitle={`${media.filter(m=>m.type==="file").length} file(s)`}/></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Text style={[s.sectionTitle,{color:theme.ink}]}>Connection / P2P</Text><Row icon="🌐" title="Preferred route" subtitle="Automatic"/><Row icon="📶" title="Nearby" subtitle="Bluetooth / Wi-Fi Direct (native build)"/><Row icon="🛡" title="Relay preference" subtitle="Privacy-first when direct P2P is not required"/></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="🚫" title="Block contact" onPress={()=>Alert.alert("Block contact?","They will not be able to message or call you.",[{text:"Block",style:"destructive",onPress:()=>st.block(peerId)},{text:"Cancel",style:"cancel"}])}/><Row icon="⚠" title="Report contact" onPress={()=>Alert.alert("Report","Report flow will be connected to moderation services in the services repository.")}/><Row icon="🗑" title="Clear chat" onPress={()=>Alert.alert("Clear chat","Local messages will be removed from this conversation.",[{text:"Clear",style:"destructive",onPress:()=>st.setConversation(peerId,{messages:[]})},{text:"Cancel",style:"cancel"}])}/></View></ScrollView></View>}
+function ContactInfo({peerId,theme,onBack,onCall,onVideo}:{peerId:string;theme:any;onBack:()=>void;onCall:()=>void;onVideo:()=>void}){const st=useNexChatStore();const c=st.contacts.find(x=>x.id===peerId);const conv=st.conversations.find(x=>x.peerId===peerId);const media=(conv?.messages||[]).map(m=>m.attachment).filter(Boolean) as Attachment[];const links=(conv?.messages||[]).filter(m=>/https?:\/\//.test(m.text));return <View style={s.flex}><Header title="Contact info" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={{paddingBottom:40}}><View style={s.profileHead}><View
+  style={[
+    s.bigAvatar,
+    {
+      backgroundColor: theme.brand,
+      overflow: "hidden",
+    },
+  ]}
+>
+  {c?.avatarUri ? (
+    <Image
+      source={{ uri: c.avatarUri }}
+      style={{
+        width: 96,
+        height: 96,
+        borderRadius: 48,
+      }}
+    />
+  ) : (
+    <Text
+      style={{
+        color: "white",
+        fontSize: 32,
+        fontWeight: "900",
+      }}
+    >
+      {(c?.displayName || peerId)
+        .slice(0, 1)
+        .toUpperCase()}
+    </Text>
+  )}
+</View><Text style={[s.profileName,{color:theme.ink}]}>{c?.displayName||peerId}</Text><Text style={{color:theme.muted}}>@{c?.username||"nexchat"}</Text><Text style={{color:theme.muted}}>{peerId}</Text><View style={{flexDirection:"row",gap:12,marginTop:14}}><Button label="📞 Voice" onPress={onCall}/><Button label="🎥 Video" onPress={onVideo}/></View></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="🔐" title="Encryption" subtitle="End-to-end encrypted"/><Row icon="🔔" title="Notifications" subtitle={conv?.muted?"Muted":"On"}/><Row icon="⏱" title="Disappearing messages" subtitle={conv?.disappearingSeconds?`${conv.disappearingSeconds}s`:"Off"} onPress={()=>Alert.alert("Disappearing messages","Choose a timer",[{text:"Off",onPress:()=>st.setConversation(peerId,{disappearingSeconds:0})},{text:"24 hours",onPress:()=>st.setConversation(peerId,{disappearingSeconds:86400})},{text:"7 days",onPress:()=>st.setConversation(peerId,{disappearingSeconds:604800})},{text:"Cancel",style:"cancel"}])}/><Row icon="👁" title="View-once media" subtitle="Available per message"/><Row icon="🎨" title="Chat theme" subtitle={conv?.theme||"Global theme"} onPress={()=>Alert.alert("Chat theme","Choose",[{text:"System",onPress:()=>st.setConversation(peerId,{theme:"system"})},{text:"Light",onPress:()=>st.setConversation(peerId,{theme:"light"})},{text:"Dark",onPress:()=>st.setConversation(peerId,{theme:"dark"})}])}/><Row icon="📌" title="Pin chat" right={<Switch value={!!conv?.pinned} onValueChange={v=>st.pinConversation(peerId,v)}/>} /><Row icon="📦" title="Archive chat" right={<Switch value={!!conv?.archived} onValueChange={v=>st.archiveConversation(peerId,v)}/>} /></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Text style={[s.sectionTitle,{color:theme.ink}]}>Shared media</Text><View style={{flexDirection:"row",flexWrap:"wrap"}}>{media.slice(-12).map(m=><MediaPreview key={m.id} media={m}/>)}</View>{media.length>0&&<Text style={{color:theme.muted,marginTop:6}}>{media.length} attachment(s) • retrievable from this chat</Text>}<Row icon="🔗" title="Links" subtitle={`${links.length} shared link(s)`}/><Row icon="📄" title="Files" subtitle={`${media.filter(m=>m.type==="file").length} file(s)`}/></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Text style={[s.sectionTitle,{color:theme.ink}]}>Connection / P2P</Text><Row icon="🌐" title="Preferred route" subtitle="Automatic"/><Row icon="📶" title="Nearby" subtitle="Bluetooth / Wi-Fi Direct (native build)"/><Row icon="🛡" title="Relay preference" subtitle="Privacy-first when direct P2P is not required"/></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="🚫" title="Block contact" onPress={()=>Alert.alert("Block contact?","They will not be able to message or call you.",[{text:"Block",style:"destructive",onPress:()=>st.block(peerId)},{text:"Cancel",style:"cancel"}])}/><Row icon="⚠" title="Report contact" onPress={()=>Alert.alert("Report","Report flow will be connected to moderation services in the services repository.")}/><Row icon="🗑" title="Clear chat" onPress={()=>Alert.alert("Clear chat","Local messages will be removed from this conversation.",[{text:"Clear",style:"destructive",onPress:()=>st.setConversation(peerId,{messages:[]})},{text:"Cancel",style:"cancel"}])}/></View></ScrollView></View>}
 
 function Settings({theme,onSection,onBack}:{theme:any;onSection:(s:string)=>void;onBack:()=>void}){const st=useNexChatStore();return <View style={s.flex}><Header title="Settings" subtitle="Every item opens a real control" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={{padding:12,paddingBottom:40}}><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="👤" title="Profile" subtitle="Name, username and NexChat ID" onPress={()=>onSection("profile")}/><Row icon="🔐" title="Account & Security" subtitle="Passcode, biometrics, trusted devices" onPress={()=>onSection("security")}/><Row icon="🛡" title="Privacy" subtitle="Presence, receipts, blocked contacts" onPress={()=>onSection("privacy")}/><Row icon="💾" title="Backup & Recovery" subtitle={`${st.settings.backupEnabled?st.settings.backupSchedule:"Off"} • encrypted`} onPress={()=>onSection("backup")}/></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="💬" title="Chats" subtitle="Disappearing messages, view-once, storage" onPress={()=>onSection("chats")}/><Row icon="🎨" title="Appearance & Themes" subtitle={st.settings.theme} onPress={()=>onSection("appearance")}/><Row icon="🔔" title="Notifications & Calls" subtitle="Messages, calls and sounds" onPress={()=>onSection("notifications")}/><Row icon="📦" title="Media & Storage" subtitle="Downloads, cache and attachment behavior" onPress={()=>onSection("media")}/></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="📡" title="Connections / P2P" subtitle="Internet, relay, Bluetooth and Wi-Fi Direct" onPress={()=>onSection("p2p")}/><Row icon="🚫" title="Blocked contacts" subtitle={`${st.blockedIds.length} blocked`} onPress={()=>onSection("blocked")}/><Row icon="📱" title="Devices" subtitle="Trusted devices and remote actions" onPress={()=>onSection("devices")}/></View></ScrollView></View>}
 
-function SettingSection({section,theme,onBack}:{section:string;theme:any;onBack:()=>void}){const st=useNexChatStore();const [id,setId]=useState<Identity|null>(null);const [name,setName]=useState("");const [username,setUsername]=useState("");useEffect(()=>{getIdentity().then(x=>{setId(x);setName(x.displayName);setUsername(x.username)})},[]);const saveProfile=async()=>{await updateIdentity({displayName:name.trim()||"NexChat User",username:username.trim().replace(/^@/,"")||"user"});Alert.alert("Saved","Profile updated locally.")};if(section==="profile")return <View style={s.flex}><Header title="Profile" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Text style={[s.label,{color:theme.ink}]}>NexChat ID</Text><Text style={[s.idBox,{color:theme.ink,borderColor:theme.line,backgroundColor:theme.card}]}>{id?.id||"Generating…"}</Text><Button label="Copy ID" secondary onPress={()=>id&&Clipboard.setStringAsync(id.id)}/><Text style={[s.label,{color:theme.ink}]}>Display name</Text><TextInput value={name} onChangeText={setName} style={[s.input,{color:theme.ink,borderColor:theme.line}]}/><Text style={[s.label,{color:theme.ink}]}>Username</Text><TextInput value={username} onChangeText={setUsername} style={[s.input,{color:theme.ink,borderColor:theme.line}]}/><Button label="Save profile" onPress={saveProfile}/><Text style={{color:theme.muted}}>The NexChat ID remains independent of a phone number.</Text></ScrollView></View>;
+function SettingSection({section,theme,onBack}:{section:string;theme:any;onBack:()=>void}){const st=useNexChatStore();const [id,setId]=useState<Identity|null>(null);const [name,setName]=useState("");const [username,setUsername]=useState("");useEffect(()=>{getIdentity().then(x=>{setId(x);setName(x.displayName);setUsername(x.username)})},[]);const saveProfile=async()=>{await updateIdentity({displayName:name.trim()||"NexChat User",username:username.trim().replace(/^@/,"")||"user"});Alert.alert("Saved","Profile updated locally.")};if(section==="profile") {
+  const profilePhoto = async () => {
+    try {
+      const uri = await pickProfilePhoto();
+
+      if (!uri) {
+        return;
+      }
+
+      await updateIdentity({
+        avatarUri: uri,
+      });
+
+      setId(await getIdentity());
+
+      Alert.alert(
+        "Profile picture updated",
+        "Your new profile picture is stored locally."
+      );
+    } catch (e) {
+      Alert.alert(
+        "Profile picture unavailable",
+        e instanceof Error
+          ? e.message
+          : "Unable to access your photos."
+      );
+    }
+  };
+
+  const removeProfilePhoto = async () => {
+    await updateIdentity({
+      avatarUri: undefined,
+    });
+
+    setId(await getIdentity());
+
+    Alert.alert(
+      "Profile picture removed",
+      "Your NexChat avatar will now use your initials."
+    );
+  };
+
+  return (
+    <View style={s.flex}>
+      <Header
+        title="Profile"
+        onBack={onBack}
+        theme={theme}
+      />
+
+      <ScrollView contentContainerStyle={s.form}>
+        <View
+          style={{
+            alignItems: "center",
+            marginBottom: 10,
+          }}
+        >
+          <View
+            style={[
+              s.profilePhoto,
+              {
+                backgroundColor: theme.surface,
+                borderColor: theme.line,
+              },
+            ]}
+          >
+            {id?.avatarUri ? (
+              <Image
+                source={{ uri: id.avatarUri }}
+                style={s.profilePhotoImage}
+              />
+            ) : (
+              <Text
+                style={{
+                  color: theme.brand,
+                  fontSize: 42,
+                  fontWeight: "900",
+                }}
+              >
+                {(id?.displayName || "N")
+                  .slice(0, 1)
+                  .toUpperCase()}
+              </Text>
+            )}
+          </View>
+
+          <View
+            style={{
+              flexDirection: "row",
+              gap: 8,
+              marginTop: 12,
+            }}
+          >
+            <Button
+              label={
+                id?.avatarUri
+                  ? "Change photo"
+                  : "Add photo"
+              }
+              onPress={profilePhoto}
+            />
+
+            {id?.avatarUri && (
+              <Button
+                label="Remove"
+                secondary
+                onPress={removeProfilePhoto}
+              />
+            )}
+          </View>
+        </View>
+
+        <Text
+          style={[
+            s.label,
+            { color: theme.ink },
+          ]}
+        >
+          NexChat ID
+        </Text>
+
+        <Text
+          style={[
+            s.idBox,
+            {
+              color: theme.ink,
+              borderColor: theme.line,
+              backgroundColor: theme.card,
+            },
+          ]}
+        >
+          {id?.id || "Generating…"}
+        </Text>
+
+        <Button
+          label="Copy ID"
+          secondary
+          onPress={() =>
+            id &&
+            Clipboard.setStringAsync(id.id)
+          }
+        />
+
+        <Text
+          style={[
+            s.label,
+            { color: theme.ink },
+          ]}
+        >
+          My NexChat QR
+        </Text>
+
+        <View
+          style={[
+            s.qrCard,
+            {
+              backgroundColor: theme.card,
+              borderColor: theme.line,
+            },
+          ]}
+        >
+          {id && (
+            <QRCode
+              value={createContactQR(id)}
+              size={190}
+              backgroundColor="white"
+              color="black"
+            />
+          )}
+
+          <Text
+            style={[
+              s.qrName,
+              { color: theme.ink },
+            ]}
+          >
+            {id?.displayName || "NexChat User"}
+          </Text>
+
+          <Text
+            style={{
+              color: theme.muted,
+              textAlign: "center",
+              marginTop: 4,
+            }}
+          >
+            Let another NexChat user scan this code
+            to add you.
+          </Text>
+        </View>
+
+        <Text
+          style={[
+            s.label,
+            { color: theme.ink },
+          ]}
+        >
+          Display name
+        </Text>
+
+        <TextInput
+          value={name}
+          onChangeText={setName}
+          style={[
+            s.input,
+            {
+              color: theme.ink,
+              borderColor: theme.line,
+            },
+          ]}
+        />
+
+        <Text
+          style={[
+            s.label,
+            { color: theme.ink },
+          ]}
+        >
+          Username
+        </Text>
+
+        <TextInput
+          value={username}
+          onChangeText={setUsername}
+          style={[
+            s.input,
+            {
+              color: theme.ink,
+              borderColor: theme.line,
+            },
+          ]}
+        />
+
+        <Button
+          label="Save profile"
+          onPress={saveProfile}
+        />
+
+        <Text
+          style={{
+            color: theme.muted,
+          }}
+        >
+          Your NexChat ID remains independent of
+          your phone number.
+        </Text>
+      </ScrollView>
+    </View>
+  );
+}
+
 if(section==="backup")return <View style={s.flex}><Header title="Backup & Recovery" subtitle="Encrypted local-first recovery" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Text style={[s.bigStat,{color:theme.ink}]}>{(st.vaultBytes/1024).toFixed(1)} KB</Text><Text style={{color:theme.muted}}>Current encrypted vault estimate</Text><Row icon="💾" title="Automatic backup" subtitle={st.settings.backupEnabled?st.settings.backupSchedule:"Off"} right={<Switch value={st.settings.backupEnabled} onValueChange={v=>st.updateSettings({backupEnabled:v})}/>} /><Text style={[s.label,{color:theme.ink}]}>Schedule</Text><View style={{flexDirection:"row",gap:8,flexWrap:"wrap"}}>{(["daily","weekly","monthly","off"] as const).map(x=><TouchableOpacity key={x} onPress={()=>st.updateSettings({backupSchedule:x,backupEnabled:x!=="off"})} style={[s.chip,{borderColor:theme.line,backgroundColor:st.settings.backupSchedule===x?theme.brand:theme.card}]}><Text style={{color:st.settings.backupSchedule===x?"white":theme.ink,fontWeight:"800"}}>{x}</Text></TouchableOpacity>)}</View><Text style={[s.label,{color:theme.ink}]}>Destination</Text><View style={{gap:8}}>{(["device","trusted-device","cloud"] as const).map(x=><Row key={x} icon={x==="cloud"?"☁️":"📱"} title={x} right={<Switch value={st.settings.backupDestination===x} onValueChange={()=>st.updateSettings({backupDestination:x})}/>} />)}</View><Button label="Verify encrypted vault" onPress={async()=>Alert.alert("Vault verification",(await verifyVault())?"Vault encryption and decryption succeeded.":"Vault verification failed.")}/><Button label="Generate Recovery Kit" secondary onPress={async()=>{const path=`${FileSystem.cacheDirectory}nexchat-recovery-kit.txt`;await FileSystem.writeAsStringAsync(path,`NexChat Recovery Kit\n\nAccount: ${id?.id||"local"}\nGenerated: ${new Date().toISOString()}\n\nThis file contains recovery instructions only. It does not contain plaintext messages or the raw vault key.\n`);if(await Sharing.isAvailableAsync())await Sharing.shareAsync(path);else Alert.alert("Recovery Kit created",path)}}/><Text style={{color:theme.muted}}>Cloud backup remains optional. Recovery material must never expose plaintext chats or raw encryption keys.</Text></ScrollView></View>;
-if(section==="appearance")return <View style={s.flex}><Header title="Appearance & Themes" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}>{(["system","light","dark","black"] as const).map(x=><Row key={x} icon={x==="black"?"⬛":"🎨"} title={x} right={<Switch value={st.settings.theme===x} onValueChange={()=>st.updateSettings({theme:x})}/>} />)}<Text style={[s.label,{color:theme.ink}]}>Chat background</Text>{(["system","white","black"] as const).map(x=><Row key={x} icon="▣" title={x} right={<Switch value={st.settings.chatBackground===x} onValueChange={()=>st.updateSettings({chatBackground:x})}/>} />)}</ScrollView></View>;
+if(section==="appearance")return <View style={s.flex}><Header title="Appearance & Themes" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}>{(["system","light","dark"] as const).map(x=><Row key={x} icon="🎨" title={x} right={<Switch value={st.settings.theme===x} onValueChange={()=>st.updateSettings({theme:x})}/>} />)}<Text style={[s.label,{color:theme.ink}]}>Chat background</Text>{(["system","white","black"] as const).map(x=><Row key={x} icon="▣" title={x} right={<Switch value={st.settings.chatBackground===x} onValueChange={()=>st.updateSettings({chatBackground:x})}/>} />)}</ScrollView></View>;
 if(section==="privacy")return <View style={s.flex}><Header title="Privacy" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Row icon="✓" title="Read receipts" right={<Switch value={st.settings.readReceipts} onValueChange={v=>st.updateSettings({readReceipts:v})}/>} /><Row icon="●" title="Online status" right={<Switch value={st.settings.onlineStatus} onValueChange={v=>st.updateSettings({onlineStatus:v})}/>} /><Row icon="◷" title="Last seen" right={<Switch value={st.settings.lastSeen} onValueChange={v=>st.updateSettings({lastSeen:v})}/>} /><Row icon="🔗" title="Link previews" right={<Switch value={st.settings.linkPreviews} onValueChange={v=>st.updateSettings({linkPreviews:v})}/>} /><Row icon="🚫" title="Blocked contacts" subtitle={`${st.blockedIds.length}`} /></ScrollView></View>;
 if(section==="chats")return <View style={s.flex}><Header title="Chat settings" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Row icon="⏱" title="Default disappearing messages" subtitle={st.settings.defaultDisappearingSeconds?`${st.settings.defaultDisappearingSeconds}s`:"Off"} onPress={()=>Alert.alert("Default timer","Choose",[{text:"Off",onPress:()=>st.updateSettings({defaultDisappearingSeconds:0})},{text:"24 hours",onPress:()=>st.updateSettings({defaultDisappearingSeconds:86400})},{text:"7 days",onPress:()=>st.updateSettings({defaultDisappearingSeconds:604800})}])}/><Row icon="👁" title="Default view-once" right={<Switch value={st.settings.defaultViewOnce} onValueChange={v=>st.updateSettings({defaultViewOnce:v})}/>} /></ScrollView></View>;
 if(section==="media")return <View style={s.flex}><Header title="Media & Storage" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Row icon="⬇" title="Auto-download media" right={<Switch value={st.settings.autoDownload} onValueChange={v=>st.updateSettings({autoDownload:v})}/>} /><Row icon="🔗" title="Link previews" right={<Switch value={st.settings.linkPreviews} onValueChange={v=>st.updateSettings({linkPreviews:v})}/>} /><Text style={{color:theme.muted}}>Media is indexed by attachment ID so shared photos/videos/files can be retrieved from the chat without scanning the entire message payload.</Text><Button label="Clear cache" secondary onPress={()=>Alert.alert("Cache","Cache clearing is safe: it does not delete your encrypted messages.")}/></ScrollView></View>;
 if(section==="p2p")return <View style={s.flex}><Header title="Connections / P2P" subtitle="Privacy-first transport controls" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Row icon="🌐" title="Automatic" subtitle="Recommended"/><Row icon="🛡" title="Prefer relay" subtitle="Avoid direct peer addressing when possible"/><Row icon="📶" title="Bluetooth" subtitle="Requires native development build"/><Row icon="📡" title="Wi-Fi Direct" subtitle="Requires native development build"/><Text style={{color:theme.muted}}>Expo Go can test the UI and local storage. Real Bluetooth/Wi-Fi Direct and WebRTC calling require the native development build layer.</Text></ScrollView></View>;
 if(section==="blocked")return <View style={s.flex}><Header title="Blocked contacts" onBack={onBack} theme={theme}/><FlatList data={st.blockedIds} keyExtractor={x=>x} contentContainerStyle={s.form} ListEmptyComponent={<Text style={{color:theme.muted}}>No blocked contacts.</Text>} renderItem={({item})=><Row icon="🚫" title={item} right={<Button label="Unblock" secondary onPress={()=>st.unblock(item)}/>}/>} /></View>;
-if(section==="security")return <View style={s.flex}><Header title="Account & Security" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Button label="Verify with device biometrics" onPress={async()=>{const r=await LocalAuthentication.authenticateAsync({promptMessage:"Verify NexChat"});Alert.alert("Biometric verification",r.success?"Verified.":"Verification cancelled or failed.")}}/><Row icon="🔒" title="Biometric app lock" right={<Switch value={st.settings.biometricLock} onValueChange={v=>st.updateSettings({biometricLock:v})}/>} /><Row icon="📱" title="Trusted devices" subtitle="Device recovery architecture"/><Text style={{color:theme.muted}}>Recovery should prioritize device authentication and a user-created recovery PIN; phone OTP is optional rather than the primary identity mechanism.</Text></ScrollView></View>;
+if(section==="security")return <View style={s.flex}><Header title="Account & Security" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><PasscodeManager theme={theme}/><Button label="Verify with device biometrics" onPress={async()=>{const r=await LocalAuthentication.authenticateAsync({promptMessage:"Verify NexChat"});Alert.alert("Biometric verification",r.success?"Verified.":"Verification cancelled or failed.")}}/><Row icon="🔒" title="Biometric app lock" right={<Switch value={st.settings.biometricLock} onValueChange={v=>st.updateSettings({biometricLock:v})}/>} /><Row icon="📱" title="Trusted devices" subtitle="Device recovery architecture"/><Text style={{color:theme.muted}}>Recovery should prioritize device authentication and a user-created recovery PIN; phone OTP is optional rather than the primary identity mechanism.</Text></ScrollView></View>;
 return <View style={s.flex}><Header title={section} onBack={onBack} theme={theme}/><View style={s.empty}><Text style={{color:theme.muted}}>This section is reserved for the next native/service layer.</Text></View></View>}
 
-function Calls({theme}:{theme:any}){return <View style={s.flex}><Header title="Calls" subtitle="Voice and video call history" theme={theme}/><View style={s.empty}><Text style={{fontSize:40}}>📞</Text><Text style={{color:theme.ink,fontWeight:"800"}}>No calls yet</Text><Text style={{color:theme.muted,textAlign:"center",maxWidth:300}}>The call UI is prepared, but actual WebRTC audio/video transport belongs in the native development build. NexChat will not fake a connected call in Expo Go.</Text></View></View>}
+function Calls({theme,onStartCall}:{theme:any;onStartCall:(peerId:string,video:boolean)=>void}){
+  const st=useNexChatStore();
+  const [searchVisible,setSearchVisible]=useState(false);
+  const [query,setQuery]=useState("");
+  const filtered=st.contacts.filter(c=>{
+    const q=query.trim().toLowerCase();
+    if(!q) return true;
+    return (c.displayName||"").toLowerCase().includes(q)||(c.username||"").toLowerCase().includes(q)||c.id.toLowerCase().includes(q);
+  });
+  return <View style={s.flex}>
+    <Header title="Calls" subtitle="Voice and video call history" theme={theme}/>
+    <View style={s.empty}>
+      <Text style={{fontSize:40}}>📞</Text>
+      <Text style={{color:theme.ink,fontWeight:"800"}}>No calls yet</Text>
+      <Text style={{color:theme.muted,textAlign:"center",maxWidth:300}}>The call UI is prepared, but actual WebRTC audio/video transport belongs in the native development build. NexChat will not fake a connected call in Expo Go.</Text>
+    </View>
+    <TouchableOpacity onPress={()=>setSearchVisible(true)} style={[s.fab,{backgroundColor:theme.brand}]}>
+      <Text style={{color:"white",fontSize:28}}>＋</Text>
+    </TouchableOpacity>
+    <Modal visible={searchVisible} animationType="slide" onRequestClose={()=>setSearchVisible(false)}>
+      <View style={[s.flex,{backgroundColor:theme.bg}]}>
+        <Header title="New call" subtitle="Search contacts" onBack={()=>setSearchVisible(false)} theme={theme}/>
+        <View style={{padding:12}}>
+          <TextInput value={query} onChangeText={setQuery} placeholder="Search by name, username or ID" placeholderTextColor={theme.muted} style={[s.messageInput,{color:theme.ink,borderColor:theme.line,backgroundColor:theme.card}]}/>
+        </View>
+        <FlatList data={filtered} keyExtractor={c=>c.id} contentContainerStyle={{padding:12,paddingBottom:40}}
+          ListEmptyComponent={<View style={s.empty}><Text style={{color:theme.muted}}>No contacts match your search.</Text></View>}
+          renderItem={({item})=>(
+            <View style={[s.chatRow,{backgroundColor:theme.card,borderColor:theme.line}]}>
+              <View style={[s.avatar,{backgroundColor:theme.brand}]}>
+                <Text style={{color:"white",fontWeight:"900"}}>{(item.displayName||item.id).slice(0,1).toUpperCase()}</Text>
+              </View>
+              <View style={{flex:1}}>
+                <Text style={[s.chatName,{color:theme.ink}]}>{item.displayName||item.id}</Text>
+                <Text style={{color:theme.muted,fontSize:12}}>{item.username?`@${item.username}`:item.id}</Text>
+              </View>
+              <TouchableOpacity onPress={()=>{setSearchVisible(false);setQuery("");onStartCall(item.id,false)}} style={{padding:8}}>
+                <Text style={{fontSize:22}}>📞</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={()=>{setSearchVisible(false);setQuery("");onStartCall(item.id,true)}} style={{padding:8}}>
+                <Text style={{fontSize:22}}>🎥</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        />
+      </View>
+    </Modal>
+  </View>
+}
 function CallOverlay({contact,video,onClose,theme}:{contact:NexContact|undefined;video:boolean;onClose:()=>void;theme:any}){const online=!!contact?.online;return <Modal transparent visible onRequestClose={onClose}><View style={s.callOverlay}><View style={[s.callCard,{backgroundColor:theme.card}]}><View style={[s.bigAvatar,{backgroundColor:theme.brand}]}><Text style={{color:"white",fontSize:34,fontWeight:"900"}}>{(contact?.displayName||"N").slice(0,1)}</Text></View><Text style={[s.profileName,{color:theme.ink}]}>{contact?.displayName||"NexChat contact"}</Text><Text style={{color:theme.muted,fontSize:16}}>{video?"🎥 Video":"📞 Voice"}</Text><Text style={{color:theme.ink,fontWeight:"800",marginTop:18}}>{online?"Ringing…":"Calling…"}</Text><Text style={{color:theme.muted,textAlign:"center",marginTop:6}}>A real ring/connection requires the native WebRTC transport. This screen deliberately reports the true state instead of pretending a call connected.</Text><Button label="End call" danger onPress={onClose}/></View></View></Modal>}
 
-export default function App(){const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);const st=useNexChatStore();const [call,setCall]=useState<{peerId:string;video:boolean}|null>(null);useEffect(()=>{(async()=>{await initIdentity();await initVault();await st.hydrate();setIdentity(await getIdentity());})();},[]);const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>setCall({peerId:screen.peerId,video:false})} onVideo={()=>setCall({peerId:screen.peerId,video:true})}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>setCall({peerId:screen.peerId,video:false})} onVideo={()=>setCall({peerId:screen.peerId,video:true})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})}/>;switch(tab){case"Chats":return <ChatList theme={theme} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <View style={s.flex}><Header title="Stories" subtitle="Coming after messaging foundation" theme={theme}/><View style={s.empty}><Text style={{fontSize:40}}>◉</Text><Text style={{color:theme.ink,fontWeight:"800"}}>Stories</Text><Text style={{color:theme.muted}}>The messaging core is the priority in this build.</Text></View></View>;default:return <View style={s.flex}><Header title="Feed" subtitle="Social layer" theme={theme}/><View style={s.empty}><Text style={{fontSize:40}}>▦</Text><Text style={{color:theme.ink,fontWeight:"800"}}>Feed</Text><Text style={{color:theme.muted}}>Social features remain isolated from private messaging storage.</Text></View></View>}},[screen,tab,theme,st]);return <SafeAreaView style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/>{body}{screen.name==="home"&&<View style={[s.nav,{backgroundColor:theme.card,borderTopColor:theme.line}]}>{(["Chats","Stories","Feed","Calls","Settings"] as Tab[]).map(x=><TouchableOpacity key={x} onPress={()=>x==="Settings"?setScreen({name:"settings"}):setTab(x)} style={s.navItem}><Text style={{fontSize:18}}>{x==="Chats"?"💬":x==="Stories"?"◉":x==="Feed"?"▦":x==="Calls"?"📞":"⚙"}</Text><Text style={{fontSize:11,color:tab===x?theme.brand:theme.muted,fontWeight:"800"}}>{x}</Text></TouchableOpacity>)}</View>}{call&&<CallOverlay contact={contact} video={call.video} onClose={()=>setCall(null)} theme={theme}/>}</SafeAreaView>}
+export default function App(){const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);const st=useNexChatStore();const [call,setCall]=useState<{peerId:string;video:boolean}|null>(null);useEffect(()=>{(async()=>{await initIdentity();await initVault();await st.hydrate();setIdentity(await getIdentity());})();},[]);const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>setCall({peerId:screen.peerId,video:false})} onVideo={()=>setCall({peerId:screen.peerId,video:true})}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>setCall({peerId:screen.peerId,video:false})} onVideo={()=>setCall({peerId:screen.peerId,video:true})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})}/>;switch(tab){case"Chats":return <ChatList theme={theme} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme} onStartCall={(peerId,video)=>setCall({peerId,video})}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <StoriesScreen theme={theme} identity={identity}/>;default:return <View style={s.flex}><Header title="Feed" subtitle="Social layer" theme={theme}/><View style={s.empty}><Text style={{fontSize:40}}>▦</Text><Text style={{color:theme.ink,fontWeight:"800"}}>Feed</Text><Text style={{color:theme.muted}}>Social features remain isolated from private messaging storage.</Text></View></View>}},[screen,tab,theme,st]);return <SafeAreaView style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/>{body}{screen.name==="home"&&<View style={[s.nav,{backgroundColor:theme.card,borderTopColor:theme.line}]}>{(["Chats","Stories","Feed","Calls","Settings"] as Tab[]).map(x=><TouchableOpacity key={x} onPress={()=>x==="Settings"?setScreen({name:"settings"}):setTab(x)} style={s.navItem}><Text style={{fontSize:18}}>{x==="Chats"?"💬":x==="Stories"?"◉":x==="Feed"?"▦":x==="Calls"?"📞":"⚙"}</Text><Text style={{fontSize:11,color:tab===x?theme.brand:theme.muted,fontWeight:"800"}}>{x}</Text></TouchableOpacity>)}</View>}{call&&<CallOverlay contact={contact} video={call.video} onClose={()=>setCall(null)} theme={theme}/>}</SafeAreaView>}
 
-const s=StyleSheet.create({safe:{flex:1},flex:{flex:1},header:{minHeight:68,paddingHorizontal:8,flexDirection:"row",alignItems:"center",borderBottomWidth:1},headBack:{width:42,alignItems:"center"},headTitle:{fontSize:18,fontWeight:"900"},headSub:{fontSize:11,marginTop:2},headAction:{width:42,alignItems:"center"},empty:{flex:1,alignItems:"center",justifyContent:"center",padding:30,gap:8},chatRow:{padding:12,borderWidth:1,borderRadius:16,marginBottom:8,flexDirection:"row",gap:12},avatar:{width:48,height:48,borderRadius:24,alignItems:"center",justifyContent:"center"},chatName:{fontWeight:"900",fontSize:16},fab:{position:"absolute",right:18,bottom:78,width:58,height:58,borderRadius:29,alignItems:"center",justifyContent:"center",elevation:4},nav:{height:66,borderTopWidth:1,flexDirection:"row",justifyContent:"space-around",paddingTop:8},navItem:{alignItems:"center",gap:2,minWidth:55},form:{padding:16,gap:12},label:{fontWeight:"900",marginTop:8},input:{borderWidth:1,borderRadius:14,padding:13,fontSize:15},chip:{borderWidth:1,borderRadius:14,padding:10,marginRight:8,minWidth:120},button:{backgroundColor:"#0C5A8D",paddingVertical:13,paddingHorizontal:16,borderRadius:14,alignItems:"center",justifyContent:"center"},secondary:{backgroundColor:"#E7EEF4"},danger:{backgroundColor:"#B42318"},buttonText:{color:"white",fontWeight:"900"},toggleLine:{flexDirection:"row",justifyContent:"space-between",alignItems:"center"},bubble:{maxWidth:"82%",padding:10,borderRadius:16,borderWidth:1,marginVertical:2},composer:{padding:8,borderTopWidth:1},messageInput:{flex:1,maxHeight:120,minHeight:44,borderWidth:1,borderRadius:22,paddingHorizontal:15,paddingVertical:10},send:{width:44,height:44,borderRadius:22,alignItems:"center",justifyContent:"center"},encryptedBar:{padding:7,alignItems:"center",borderBottomWidth:1},section:{marginBottom:12,borderWidth:1,borderRadius:16,overflow:"hidden"},row:{minHeight:58,paddingHorizontal:14,paddingVertical:9,flexDirection:"row",alignItems:"center",gap:12},rowIcon:{fontSize:19,width:25,textAlign:"center"},rowTitle:{fontWeight:"800",fontSize:15},rowSub:{fontSize:11,color:"#66788A",marginTop:2},chevron:{fontSize:25,color:"#78909C"},sectionTitle:{fontWeight:"900",fontSize:16,padding:14,paddingBottom:4},profileHead:{alignItems:"center",padding:24},bigAvatar:{width:96,height:96,borderRadius:48,alignItems:"center",justifyContent:"center"},profileName:{fontSize:23,fontWeight:"900",marginTop:10},idBox:{borderWidth:1,borderRadius:14,padding:15,fontWeight:"900",textAlign:"center"},bigStat:{fontSize:30,fontWeight:"900"},overlay:{flex:1,backgroundColor:"#0009",alignItems:"center",justifyContent:"center",padding:24},dialog:{width:"92%",padding:20,borderRadius:20,gap:12},dialogTitle:{fontSize:20,fontWeight:"900"},callOverlay:{flex:1,backgroundColor:"#000B",alignItems:"center",justifyContent:"center",padding:20},callCard:{width:"90%",borderRadius:26,padding:28,alignItems:"center",gap:10}})
+const s=StyleSheet.create({safe:{flex:1},flex:{flex:1},header:{minHeight:68,paddingHorizontal:8,flexDirection:"row",alignItems:"center",borderBottomWidth:1},headBack:{width:42,alignItems:"center"},headTitle:{fontSize:18,fontWeight:"900"},headSub:{fontSize:11,marginTop:2},headAction:{width:42,alignItems:"center"},empty:{flex:1,alignItems:"center",justifyContent:"center",padding:30,gap:8},chatRow:{padding:12,borderWidth:1,borderRadius:16,marginBottom:8,flexDirection:"row",gap:12},avatar:{width:48,height:48,borderRadius:24,alignItems:"center",justifyContent:"center"},chatName:{fontWeight:"900",fontSize:16},fab:{position:"absolute",right:18,bottom:78,width:58,height:58,borderRadius:29,alignItems:"center",justifyContent:"center",elevation:4},nav:{height:66,borderTopWidth:1,flexDirection:"row",justifyContent:"space-around",paddingTop:8},navItem:{alignItems:"center",gap:2,minWidth:55},form:{padding:16,gap:12},label:{fontWeight:"900",marginTop:8},input:{borderWidth:1,borderRadius:14,padding:13,fontSize:15},chip:{borderWidth:1,borderRadius:14,padding:10,marginRight:8,minWidth:120},button:{backgroundColor:"#0C5A8D",paddingVertical:13,paddingHorizontal:16,borderRadius:14,alignItems:"center",justifyContent:"center"},secondary:{backgroundColor:"#E7EEF4"},danger:{backgroundColor:"#B42318"},buttonText:{color:"white",fontWeight:"900"},toggleLine:{flexDirection:"row",justifyContent:"space-between",alignItems:"center"},bubble:{maxWidth:"82%",padding:10,borderRadius:16,borderWidth:1,marginVertical:2},composer:{padding:8,borderTopWidth:1},messageInput:{flex:1,maxHeight:120,minHeight:44,borderWidth:1,borderRadius:22,paddingHorizontal:15,paddingVertical:10},send:{width:44,height:44,borderRadius:22,alignItems:"center",justifyContent:"center"},encryptedBar:{padding:7,alignItems:"center",borderBottomWidth:1},section:{marginBottom:12,borderWidth:1,borderRadius:16,overflow:"hidden"},row:{minHeight:58,paddingHorizontal:14,paddingVertical:9,flexDirection:"row",alignItems:"center",gap:12},rowIcon:{fontSize:19,width:25,textAlign:"center"},rowTitle:{fontWeight:"800",fontSize:15},rowSub:{fontSize:11,color:"#66788A",marginTop:2},chevron:{fontSize:25,color:"#78909C"},sectionTitle:{fontWeight:"900",fontSize:16,padding:14,paddingBottom:4},profileHead:{alignItems:"center",padding:24},bigAvatar:{width:96,height:96,borderRadius:48,alignItems:"center",justifyContent:"center"},profileName:{fontSize:23,fontWeight:"900",marginTop:10},idBox:{borderWidth:1,borderRadius:14,padding:15,fontWeight:"900",textAlign:"center"},bigStat:{fontSize:30,fontWeight:"900"},overlay:{flex:1,backgroundColor:"#0009",alignItems:"center",justifyContent:"center",padding:24},dialog:{width:"92%",padding:20,borderRadius:20,gap:12},dialogTitle:{fontSize:20,fontWeight:"900"},callOverlay:{flex:1,backgroundColor:"#000B",alignItems:"center",justifyContent:"center",padding:20},callCard:{width:"90%",borderRadius:26,padding:28,alignItems:"center",gap:10},profilePhoto:{width:120,height:120,borderRadius:60,borderWidth:2,alignItems:"center",justifyContent:"center",overflow:"hidden"},profilePhotoImage:{width:120,height:120,borderRadius:60},qrCard:{alignItems:"center",justifyContent:"center",padding:20,borderWidth:1,borderRadius:20},qrName:{fontSize:18,fontWeight:"900",marginTop:14}})

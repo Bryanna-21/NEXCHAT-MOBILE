@@ -3,11 +3,11 @@ import {readVault,saveVault,clearVault} from "./vault";
 
 export type AttachmentType="image"|"video"|"audio"|"file";
 export type Attachment={id:string;uri:string;type:AttachmentType;name:string;mimeType?:string;width?:number;height?:number;duration?:number;size?:number;viewOnce?:boolean;expiresAt?:string;viewedAt?:string};
-export type MessageStatus="sending"|"queued"|"sent"|"delivered"|"read"|"failed";
+export type MessageStatus="sending"|"sent"|"delivered"|"read"|"failed";
 export type Message={id:string;peerId:string;sender:"me"|"them";text:string;createdAt:string;status:MessageStatus;attachment?:Attachment;viewedAt?:string;editedAt?:string;replyTo?:string;viewOnce?:boolean;expiresAt?:string;deletedForMe?:boolean;deletedForEveryone?:boolean};
-export type Conversation={id:string;peerId:string;messages:Message[];pinned?:boolean;archived?:boolean;muted?:boolean;locked?:boolean;disappearingSeconds?:number;theme?:"system"|"light"|"dark"|"black"};
+export type Conversation={id:string;peerId:string;messages:Message[];pinned?:boolean;archived?:boolean;muted?:boolean;locked?:boolean;disappearingSeconds?:number;theme?:"system"|"light"|"dark"};
 export type NexContact={id:string;displayName:string;username?:string;phone?:string;avatarUri?:string;online?:boolean;bio?:string;blocked?:boolean};
-export type AppSettings={theme:"system"|"light"|"dark"|"black";chatBackground:"system"|"white"|"black"|"custom";backupEnabled:boolean;backupSchedule:"daily"|"weekly"|"monthly"|"off";backupDestination:"device"|"trusted-device"|"cloud";readReceipts:boolean;lastSeen:boolean;onlineStatus:boolean;autoDownload:boolean;linkPreviews:boolean;defaultDisappearingSeconds:number;defaultViewOnce:boolean;biometricLock:boolean};
+export type AppSettings={theme:"system"|"light"|"dark";chatBackground:"system"|"white"|"black"|"custom";backupEnabled:boolean;backupSchedule:"daily"|"weekly"|"monthly"|"off";backupDestination:"device"|"trusted-device"|"cloud";readReceipts:boolean;lastSeen:boolean;onlineStatus:boolean;autoDownload:boolean;linkPreviews:boolean;defaultDisappearingSeconds:number;defaultViewOnce:boolean;biometricLock:boolean};
 export type PersistedState={conversations:Conversation[];contacts:NexContact[];settings:AppSettings;blockedIds:string[]};
 
 const demo:NexContact={id:"N-4827-9153-64",displayName:"NexChat Demo",username:"demo",online:true,bio:"Local NexChat demo contact"};
@@ -33,10 +33,15 @@ export function useNexChatStore(){
       if(state.blockedIds.includes(peerId)) throw new Error("This contact is blocked.");
       let c=findConversation(peerId); if(!c){c={id:`conv-${Date.now()}-${peerId}`,peerId,messages:[],disappearingSeconds:state.settings.defaultDisappearingSeconds};}
       const now=new Date(); const seconds=opts?.disappearingSeconds??c.disappearingSeconds??0;
-      const msg:Message={id:`msg-${now.getTime()}-${Math.random().toString(36).slice(2,8)}`,peerId,sender:"me",text,createdAt:now.toISOString(),status:"queued",attachment,viewOnce:opts?.viewOnce??state.settings.defaultViewOnce,expiresAt:seconds?new Date(now.getTime()+seconds*1000).toISOString():undefined};
+      const msg:Message={id:`msg-${now.getTime()}-${Math.random().toString(36).slice(2,8)}`,peerId,sender:"me",text,createdAt:now.toISOString(),status:"sending",attachment,viewOnce:opts?.viewOnce??state.settings.defaultViewOnce,expiresAt:seconds?new Date(now.getTime()+seconds*1000).toISOString():undefined};
       const next={...c,messages:[...c.messages,msg]};
       const conversations=[next,...state.conversations.filter(x=>x.peerId!==peerId)];
-      await queuePersist({conversations}); return msg;
+      await queuePersist({conversations});
+      const advanceStatus=(status:MessageStatus)=>{queuePersist({conversations:state.conversations.map(conv=>conv.peerId===peerId?{...conv,messages:conv.messages.map(mm=>mm.id===msg.id?{...mm,status}:mm)}:conv)});};
+      setTimeout(()=>advanceStatus("sent"),600);
+      setTimeout(()=>advanceStatus("delivered"),1500);
+      setTimeout(()=>advanceStatus("read"),3000);
+      return msg;
     },
     editMessage:async(id:string,text:string)=>{await queuePersist({conversations:state.conversations.map(c=>({...c,messages:c.messages.map(m=>m.id===id?{...m,text,editedAt:new Date().toISOString()}:m)}))})},
     deleteMessage:async(id:string,forEveryone=false)=>{await queuePersist({conversations:state.conversations.map(c=>({...c,messages:c.messages.flatMap(m=>m.id===id?(forEveryone?[{...m,text:"This message was deleted",attachment:undefined,deletedForEveryone:true}]:[{...m,text:"This message was deleted",attachment:undefined,deletedForMe:true}]):[m])}))})},
