@@ -1,12 +1,19 @@
 {
   "expo": {
-    "name":"NexChat",
-    "slug":"nexchat",
-    "version":"0.2.0",
-    "orientation":"portrait",
-    "userInterfaceStyle":"automatic",
-    "scheme":"nexchat",
-    "android":{"package":"com.nexchat.app"},
-    "ios":{"bundleIdentifier":"com.nexchat.app"}
+    "name": "NexChat",
+    "slug": "nexchat",
+    "version": "0.2.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "scheme": "nexchat",
+    "android": {
+      "package": "com.nexchat.app"
+    },
+    "ios": {
+      "bundleIdentifier": "com.nexchat.app"
+    },
+    "plugins": [
+      "expo-audio"
+    ]
   }
 }
