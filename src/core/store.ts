@@ -1,58 +1,670 @@
-import {useSyncExternalStore} from "react";
-import {readVault,saveVault,clearVault} from "./vault";
+import { useSyncExternalStore } from "react";
+import { readVault, saveVault, clearVault } from "./vault";
 
-export type AttachmentType="image"|"video"|"audio"|"file";
-export type Attachment={id:string;uri:string;type:AttachmentType;name:string;mimeType?:string;width?:number;height?:number;duration?:number;size?:number;viewOnce?:boolean;expiresAt?:string;viewedAt?:string};
-export type MessageStatus="sending"|"sent"|"delivered"|"read"|"failed";
-export type Message={id:string;peerId:string;sender:"me"|"them";text:string;createdAt:string;status:MessageStatus;attachment?:Attachment;viewedAt?:string;editedAt?:string;replyTo?:string;viewOnce?:boolean;expiresAt?:string;deletedForMe?:boolean;deletedForEveryone?:boolean};
-export type Conversation={id:string;peerId:string;messages:Message[];pinned?:boolean;archived?:boolean;muted?:boolean;locked?:boolean;disappearingSeconds?:number;theme?:"system"|"light"|"dark"};
-export type NexContact={id:string;displayName:string;username?:string;phone?:string;avatarUri?:string;online?:boolean;bio?:string;blocked?:boolean};
-export type AppSettings={theme:"system"|"light"|"dark";chatBackground:"system"|"white"|"black"|"custom";backupEnabled:boolean;backupSchedule:"daily"|"weekly"|"monthly"|"off";backupDestination:"device"|"trusted-device"|"cloud";readReceipts:boolean;lastSeen:boolean;onlineStatus:boolean;autoDownload:boolean;linkPreviews:boolean;defaultDisappearingSeconds:number;defaultViewOnce:boolean;biometricLock:boolean};
-export type PersistedState={conversations:Conversation[];contacts:NexContact[];settings:AppSettings;blockedIds:string[]};
+/* =========================================================
+   NEXCHAT STORE
+   Compatibility-complete local-first state model.
+   ========================================================= */
 
-const demo:NexContact={id:"N-4827-9153-64",displayName:"NexChat Demo",username:"demo",online:true,bio:"Local NexChat demo contact"};
-const defaults:AppSettings={theme:"system",chatBackground:"system",backupEnabled:false,backupSchedule:"weekly",backupDestination:"device",readReceipts:true,lastSeen:true,onlineStatus:true,autoDownload:true,linkPreviews:true,defaultDisappearingSeconds:0,defaultViewOnce:false,biometricLock:false};
-let state:{conversations:Conversation[];contacts:NexContact[];settings:AppSettings;blockedIds:string[];vaultBytes:number}={conversations:[],contacts:[demo],settings:defaults,blockedIds:[],vaultBytes:0};
-const listeners=new Set<()=>void>();
-const emit=()=>listeners.forEach(l=>l());
-let writeChain=Promise.resolve();
-function queuePersist(next:Partial<PersistedState>){
-  state={...state,...next}; emit();
-  const payload:PersistedState={conversations:state.conversations,contacts:state.contacts,settings:state.settings,blockedIds:state.blockedIds};
-  writeChain=writeChain.then(async()=>{await saveVault(payload); state={...state,vaultBytes:JSON.stringify(payload).length};emit();});
+export type MessageStatus =
+  | "sending"
+  | "sent"
+  | "delivered"
+  | "read"
+  | "failed";
+
+export type AttachmentType =
+  | "image"
+  | "video"
+  | "audio"
+  | "file";
+
+export type Attachment = {
+  id: string;
+  type: AttachmentType;
+  uri: string;
+  name?: string;
+  mimeType?: string;
+  size?: number;
+  duration?: number;
+  width?: number;
+  height?: number;
+  expiresAt?: string;
+};
+
+export type Message = {
+  id: string;
+
+  /* Current canonical field */
+  senderId: string;
+
+  /* Compatibility field used by older UI code */
+  sender: string;
+
+  recipientId: string;
+
+  text: string;
+  createdAt: string;
+  editedAt?: string;
+
+  status: MessageStatus;
+
+  attachment?: Attachment;
+
+  viewOnce?: boolean;
+  viewedAt?: string;
+
+  expiresAt?: string;
+
+  deletedForEveryone?: boolean;
+  deletedForMe?: boolean;
+};
+
+export type NexContact = {
+  id: string;
+  displayName: string;
+  username?: string;
+
+  /*
+   * Keep both names because different UI components currently
+   * reference different versions of the profile model.
+   */
+  avatar?: string;
+  avatarUri?: string;
+
+  phoneNumber?: string;
+  bio?: string;
+
+  online?: boolean;
+  blocked?: boolean;
+};
+
+export type Conversation = {
+  id: string;
+  peerId: string;
+
+  messages: Message[];
+
+  pinned?: boolean;
+  archived?: boolean;
+  muted?: boolean;
+  locked?: boolean;
+
+  theme?: "system" | "light" | "dark";
+
+  disappearingSeconds?: number;
+};
+
+export type AppSettings = {
+  theme: "system" | "light" | "dark";
+
+  chatBackground:
+    | "system"
+    | "white"
+    | "black"
+    | "custom";
+
+  backupEnabled: boolean;
+
+  backupSchedule:
+    | "daily"
+    | "weekly"
+    | "monthly"
+    | "off";
+
+  backupDestination:
+    | "device"
+    | "trusted-device"
+    | "cloud";
+
+  readReceipts: boolean;
+  lastSeen: boolean;
+  onlineStatus: boolean;
+
+  autoDownload: boolean;
+  linkPreviews: boolean;
+
+  defaultDisappearingSeconds: number;
+  defaultViewOnce: boolean;
+
+  biometricLock: boolean;
+
+  // P2P / connection controls
+  p2pRoute: "automatic" | "relay" | "wifi-direct" | "bluetooth";
+  allowDirectP2P: boolean;
+  hideDirectAddress: boolean;
+};
+
+export type PersistedState = {
+  conversations: Conversation[];
+  contacts: NexContact[];
+  settings: AppSettings;
+  blockedIds: string[];
+};
+
+const demo: NexContact = {
+  id: "N-4827-9153-64",
+  displayName: "NexChat Demo",
+  username: "demo",
+  avatar: undefined,
+  avatarUri: undefined,
+  online: true,
+  bio: "Local NexChat demo contact",
+};
+
+const defaults: AppSettings = {
+  theme: "system",
+  chatBackground: "system",
+
+  backupEnabled: false,
+  backupSchedule: "off",
+  backupDestination: "device",
+
+  readReceipts: true,
+  lastSeen: true,
+  onlineStatus: true,
+
+  autoDownload: true,
+  linkPreviews: true,
+
+  defaultDisappearingSeconds: 0,
+  defaultViewOnce: false,
+
+  biometricLock: false,
+
+  // Privacy-first P2P defaults
+  p2pRoute: "automatic",
+  allowDirectP2P: false,
+  hideDirectAddress: true,
+};
+
+let state: {
+  conversations: Conversation[];
+  contacts: NexContact[];
+  settings: AppSettings;
+  blockedIds: string[];
+  vaultBytes: number;
+} = {
+  conversations: [],
+  contacts: [demo],
+  settings: defaults,
+  blockedIds: [],
+  vaultBytes: 0,
+};
+
+const listeners = new Set<() => void>();
+
+let writeChain: Promise<void> = Promise.resolve();
+
+function emit(): void {
+  for (const listener of listeners) {
+    listener();
+  }
+}
+
+function findConversation(
+  peerId: string
+): Conversation | undefined {
+  return state.conversations.find(
+    (conversation) => conversation.peerId === peerId
+  );
+}
+
+function makeMessage(
+  peerId: string,
+  text: string,
+  attachment?: Attachment,
+  options?: {
+    viewOnce?: boolean;
+    disappearingSeconds?: number;
+  }
+): Message {
+  const now = new Date().toISOString();
+
+  const disappearingSeconds =
+    options?.disappearingSeconds ??
+    findConversation(peerId)?.disappearingSeconds ??
+    state.settings.defaultDisappearingSeconds;
+
+  const expiresAt =
+    disappearingSeconds > 0
+      ? new Date(
+          Date.now() + disappearingSeconds * 1000
+        ).toISOString()
+      : undefined;
+
+  return {
+    id: `msg-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 10)}`,
+
+    senderId: "me",
+
+    /*
+     * Existing App.tsx checks sender === "me".
+     * Preserve it until the UI is migrated completely.
+     */
+    sender: "me",
+
+    recipientId: peerId,
+
+    text,
+
+    createdAt: now,
+
+    status: "sent",
+
+    attachment,
+
+    viewOnce:
+      options?.viewOnce ??
+      state.settings.defaultViewOnce,
+
+    expiresAt,
+  };
+}
+
+function queuePersist(
+  next: Partial<PersistedState>
+): Promise<void> {
+  writeChain = writeChain.then(async () => {
+    const current: PersistedState = {
+      conversations: state.conversations,
+      contacts: state.contacts,
+      settings: state.settings,
+      blockedIds: state.blockedIds,
+    };
+
+    const merged: PersistedState = {
+      ...current,
+      ...next,
+    };
+
+    state = {
+      ...state,
+      ...merged,
+      vaultBytes: JSON.stringify(merged).length,
+    };
+
+    await saveVault(merged);
+
+    emit();
+  });
+
   return writeChain;
 }
-const findConversation=(peerId:string)=>state.conversations.find(c=>c.peerId===peerId);
 
-export function useNexChatStore(){
-  const snap=useSyncExternalStore(l=>{listeners.add(l);return()=>listeners.delete(l)},()=>state,()=>state);
-  return {...snap,
-    hydrate:async()=>{const data=await readVault<PersistedState>();if(data){state={...state,...data,vaultBytes:JSON.stringify(data).length};emit();}},
-    ensureConversation:async(peerId:string)=>{let c=findConversation(peerId);if(c)return c; c={id:`conv-${Date.now()}-${peerId}`,peerId,messages:[],disappearingSeconds:state.settings.defaultDisappearingSeconds};await queuePersist({conversations:[c,...state.conversations]});return c;},
-    sendMessage:async(peerId:string,text:string,attachment?:Attachment,opts?:{viewOnce?:boolean;disappearingSeconds?:number})=>{
-      if(state.blockedIds.includes(peerId)) throw new Error("This contact is blocked.");
-      let c=findConversation(peerId); if(!c){c={id:`conv-${Date.now()}-${peerId}`,peerId,messages:[],disappearingSeconds:state.settings.defaultDisappearingSeconds};}
-      const now=new Date(); const seconds=opts?.disappearingSeconds??c.disappearingSeconds??0;
-      const msg:Message={id:`msg-${now.getTime()}-${Math.random().toString(36).slice(2,8)}`,peerId,sender:"me",text,createdAt:now.toISOString(),status:"sending",attachment,viewOnce:opts?.viewOnce??state.settings.defaultViewOnce,expiresAt:seconds?new Date(now.getTime()+seconds*1000).toISOString():undefined};
-      const next={...c,messages:[...c.messages,msg]};
-      const conversations=[next,...state.conversations.filter(x=>x.peerId!==peerId)];
-      await queuePersist({conversations});
-      const advanceStatus=(status:MessageStatus)=>{queuePersist({conversations:state.conversations.map(conv=>conv.peerId===peerId?{...conv,messages:conv.messages.map(mm=>mm.id===msg.id?{...mm,status}:mm)}:conv)});};
-      setTimeout(()=>advanceStatus("sent"),600);
-      setTimeout(()=>advanceStatus("delivered"),1500);
-      setTimeout(()=>advanceStatus("read"),3000);
-      return msg;
+export function useNexChatStore() {
+  const snapshot = useSyncExternalStore(
+    (listener) => {
+      listeners.add(listener);
+
+      return () => {
+        listeners.delete(listener);
+      };
     },
-    editMessage:async(id:string,text:string)=>{await queuePersist({conversations:state.conversations.map(c=>({...c,messages:c.messages.map(m=>m.id===id?{...m,text,editedAt:new Date().toISOString()}:m)}))})},
-    deleteMessage:async(id:string,forEveryone=false)=>{await queuePersist({conversations:state.conversations.map(c=>({...c,messages:c.messages.flatMap(m=>m.id===id?(forEveryone?[{...m,text:"This message was deleted",attachment:undefined,deletedForEveryone:true}]:[{...m,text:"This message was deleted",attachment:undefined,deletedForMe:true}]):[m])}))})},
-    markViewOnce:async(id:string)=>{await queuePersist({conversations:state.conversations.map(c=>({...c,messages:c.messages.map(m=>m.id===id?{...m,viewedAt:new Date().toISOString()}:m)}))})},
-    pinConversation:async(peerId:string,pinned=true)=>{await queuePersist({conversations:state.conversations.map(c=>c.peerId===peerId?{...c,pinned}:c)})},
-    archiveConversation:async(peerId:string,archived=true)=>{await queuePersist({conversations:state.conversations.map(c=>c.peerId===peerId?{...c,archived}:c)})},
-    setConversation:async(peerId:string,patch:Partial<Conversation>)=>{await queuePersist({conversations:state.conversations.map(c=>c.peerId===peerId?{...c,...patch}:c)})},
-    updateSettings:async(patch:Partial<AppSettings>)=>queuePersist({settings:{...state.settings,...patch}}),
-    block:async(id:string)=>queuePersist({blockedIds:Array.from(new Set([...state.blockedIds,id])),contacts:state.contacts.map(c=>c.id===id?{...c,blocked:true}:c)}),
-    unblock:async(id:string)=>queuePersist({blockedIds:state.blockedIds.filter(x=>x!==id),contacts:state.contacts.map(c=>c.id===id?{...c,blocked:false}:c)}),
-    addContact:async(c:NexContact)=>{if(state.contacts.some(x=>x.id===c.id))return;await queuePersist({contacts:[c,...state.contacts]});},
-    reset:async()=>{await clearVault();state={conversations:[],contacts:[demo],settings:defaults,blockedIds:[],vaultBytes:0};emit()}
+    () => state,
+    () => state
+  );
+
+  return {
+    ...snapshot,
+
+    hydrate: async (): Promise<void> => {
+      const data =
+        await readVault<PersistedState>();
+
+      if (!data) {
+        return;
+      }
+
+      state = {
+        ...state,
+        conversations: data.conversations ?? [],
+        contacts:
+          data.contacts?.length
+            ? data.contacts
+            : [demo],
+        settings: {
+          ...defaults,
+          ...(data.settings ?? {}),
+        },
+        blockedIds: data.blockedIds ?? [],
+        vaultBytes: JSON.stringify(data).length,
+      };
+
+      emit();
+    },
+
+    ensureConversation: async (
+      peerId: string
+    ): Promise<Conversation> => {
+      const existing = findConversation(peerId);
+
+      if (existing) {
+        return existing;
+      }
+
+      const conversation: Conversation = {
+        id: `conv-${Date.now()}-${peerId}`,
+        peerId,
+        messages: [],
+        disappearingSeconds:
+          state.settings.defaultDisappearingSeconds,
+      };
+
+      await queuePersist({
+        conversations: [
+          conversation,
+          ...state.conversations,
+        ],
+      });
+
+      return conversation;
+    },
+
+    sendMessage: async (
+      peerId: string,
+      text: string,
+      attachment?: Attachment,
+      options?: {
+        viewOnce?: boolean;
+        disappearingSeconds?: number;
+      }
+    ): Promise<void> => {
+      if (state.blockedIds.includes(peerId)) {
+        throw new Error(
+          "This contact is blocked."
+        );
+      }
+
+      let conversation = findConversation(peerId);
+
+      if (!conversation) {
+        conversation = {
+          id: `conv-${Date.now()}-${peerId}`,
+          peerId,
+          messages: [],
+          disappearingSeconds:
+            state.settings.defaultDisappearingSeconds,
+        };
+      }
+
+      const message = makeMessage(
+        peerId,
+        text,
+        attachment,
+        options
+      );
+
+      const updatedConversation: Conversation = {
+        ...conversation,
+        messages: [
+          ...conversation.messages,
+          message,
+        ],
+      };
+
+      const exists = state.conversations.some(
+        (c) => c.peerId === peerId
+      );
+
+      const conversations = exists
+        ? state.conversations.map((c) =>
+            c.peerId === peerId
+              ? updatedConversation
+              : c
+          )
+        : [
+            updatedConversation,
+            ...state.conversations,
+          ];
+
+      await queuePersist({
+        conversations,
+      });
+    },
+
+    editMessage: async (
+      id: string,
+      text: string
+    ): Promise<void> => {
+      const cleaned = text.trim();
+
+      if (!cleaned) {
+        throw new Error(
+          "Message cannot be empty."
+        );
+      }
+
+      await queuePersist({
+        conversations:
+          state.conversations.map((conversation) => ({
+            ...conversation,
+
+            messages:
+              conversation.messages.map((message) =>
+                message.id === id
+                  ? {
+                      ...message,
+                      text: cleaned,
+                      editedAt:
+                        new Date().toISOString(),
+                    }
+                  : message
+              ),
+          })),
+      });
+    },
+
+    deleteMessage: async (
+      id: string,
+      forEveryone = false
+    ): Promise<void> => {
+      await queuePersist({
+        conversations:
+          state.conversations.map((conversation) => ({
+            ...conversation,
+
+            messages:
+              conversation.messages.map((message) =>
+                message.id === id
+                  ? {
+                      ...message,
+
+                      text: forEveryone
+                        ? "This message was deleted"
+                        : message.text,
+
+                      attachment:
+                        undefined,
+
+                      ...(forEveryone
+                        ? {
+                            deletedForEveryone:
+                              true,
+                          }
+                        : {
+                            deletedForMe: true,
+                          }),
+                    }
+                  : message
+              ),
+          })),
+      });
+    },
+
+    markViewOnce: async (
+      id: string
+    ): Promise<void> => {
+      await queuePersist({
+        conversations:
+          state.conversations.map((conversation) => ({
+            ...conversation,
+
+            messages:
+              conversation.messages.map((message) =>
+                message.id === id
+                  ? {
+                      ...message,
+                      viewedAt:
+                        new Date().toISOString(),
+                    }
+                  : message
+              ),
+          })),
+      });
+    },
+
+    pinConversation: async (
+      peerId: string,
+      pinned = true
+    ): Promise<void> => {
+      await queuePersist({
+        conversations:
+          state.conversations.map((conversation) =>
+            conversation.peerId === peerId
+              ? {
+                  ...conversation,
+                  pinned,
+                }
+              : conversation
+          ),
+      });
+    },
+
+    archiveConversation: async (
+      peerId: string,
+      archived = true
+    ): Promise<void> => {
+      await queuePersist({
+        conversations:
+          state.conversations.map((conversation) =>
+            conversation.peerId === peerId
+              ? {
+                  ...conversation,
+                  archived,
+                }
+              : conversation
+          ),
+      });
+    },
+
+    setConversation: async (
+      peerId: string,
+      patch: Partial<Conversation>
+    ): Promise<void> => {
+      await queuePersist({
+        conversations:
+          state.conversations.map((conversation) =>
+            conversation.peerId === peerId
+              ? {
+                  ...conversation,
+                  ...patch,
+                }
+              : conversation
+          ),
+      });
+    },
+
+    updateSettings: async (
+      patch: Partial<AppSettings>
+    ): Promise<void> => {
+      await queuePersist({
+        settings: {
+          ...state.settings,
+          ...patch,
+        },
+      });
+    },
+
+    block: async (
+      id: string
+    ): Promise<void> => {
+      await queuePersist({
+        blockedIds: Array.from(
+          new Set([
+            ...state.blockedIds,
+            id,
+          ])
+        ),
+
+        contacts: state.contacts.map(
+          (contact) =>
+            contact.id === id
+              ? {
+                  ...contact,
+                  blocked: true,
+                }
+              : contact
+        ),
+      });
+    },
+
+    unblock: async (
+      id: string
+    ): Promise<void> => {
+      await queuePersist({
+        blockedIds:
+          state.blockedIds.filter(
+            (blockedId) =>
+              blockedId !== id
+          ),
+
+        contacts: state.contacts.map(
+          (contact) =>
+            contact.id === id
+              ? {
+                  ...contact,
+                  blocked: false,
+                }
+              : contact
+        ),
+      });
+    },
+
+    addContact: async (
+      contact: NexContact
+    ): Promise<void> => {
+      if (
+        state.contacts.some(
+          (existing) =>
+            existing.id === contact.id
+        )
+      ) {
+        return;
+      }
+
+      const normalized: NexContact = {
+        ...contact,
+        avatar:
+          contact.avatar ??
+          contact.avatarUri,
+        avatarUri:
+          contact.avatarUri ??
+          contact.avatar,
+      };
+
+      await queuePersist({
+        contacts: [
+          normalized,
+          ...state.contacts,
+        ],
+      });
+    },
+
+    reset: async (): Promise<void> => {
+      await clearVault();
+
+      state = {
+        conversations: [],
+        contacts: [demo],
+        settings: defaults,
+        blockedIds: [],
+        vaultBytes: 0,
+      };
+
+      emit();
+    },
   };
 }

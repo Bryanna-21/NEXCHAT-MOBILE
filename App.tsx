@@ -633,7 +633,71 @@ if(section==="appearance")return <View style={s.flex}><Header title="Appearance 
 if(section==="privacy")return <View style={s.flex}><Header title="Privacy" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Row icon="✓" title="Read receipts" right={<Switch value={st.settings.readReceipts} onValueChange={v=>st.updateSettings({readReceipts:v})}/>} /><Row icon="●" title="Online status" right={<Switch value={st.settings.onlineStatus} onValueChange={v=>st.updateSettings({onlineStatus:v})}/>} /><Row icon="◷" title="Last seen" right={<Switch value={st.settings.lastSeen} onValueChange={v=>st.updateSettings({lastSeen:v})}/>} /><Row icon="🔗" title="Link previews" right={<Switch value={st.settings.linkPreviews} onValueChange={v=>st.updateSettings({linkPreviews:v})}/>} /><Row icon="🚫" title="Blocked contacts" subtitle={`${st.blockedIds.length}`} /></ScrollView></View>;
 if(section==="chats")return <View style={s.flex}><Header title="Chat settings" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Row icon="⏱" title="Default disappearing messages" subtitle={st.settings.defaultDisappearingSeconds?`${st.settings.defaultDisappearingSeconds}s`:"Off"} onPress={()=>Alert.alert("Default timer","Choose",[{text:"Off",onPress:()=>st.updateSettings({defaultDisappearingSeconds:0})},{text:"24 hours",onPress:()=>st.updateSettings({defaultDisappearingSeconds:86400})},{text:"7 days",onPress:()=>st.updateSettings({defaultDisappearingSeconds:604800})}])}/><Row icon="👁" title="Default view-once" right={<Switch value={st.settings.defaultViewOnce} onValueChange={v=>st.updateSettings({defaultViewOnce:v})}/>} /></ScrollView></View>;
 if(section==="media")return <View style={s.flex}><Header title="Media & Storage" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Row icon="⬇" title="Auto-download media" right={<Switch value={st.settings.autoDownload} onValueChange={v=>st.updateSettings({autoDownload:v})}/>} /><Row icon="🔗" title="Link previews" right={<Switch value={st.settings.linkPreviews} onValueChange={v=>st.updateSettings({linkPreviews:v})}/>} /><Text style={{color:theme.muted}}>Media is indexed by attachment ID so shared photos/videos/files can be retrieved from the chat without scanning the entire message payload.</Text><Button label="Clear cache" secondary onPress={()=>Alert.alert("Cache","Cache clearing is safe: it does not delete your encrypted messages.")}/></ScrollView></View>;
-if(section==="p2p")return <View style={s.flex}><Header title="Connections / P2P" subtitle="Privacy-first transport controls" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Row icon="🌐" title="Automatic" subtitle="Recommended"/><Row icon="🛡" title="Prefer relay" subtitle="Avoid direct peer addressing when possible"/><Row icon="📶" title="Bluetooth" subtitle="Requires native development build"/><Row icon="📡" title="Wi-Fi Direct" subtitle="Requires native development build"/><Text style={{color:theme.muted}}>Expo Go can test the UI and local storage. Real Bluetooth/Wi-Fi Direct and WebRTC calling require the native development build layer.</Text></ScrollView></View>;
+if(section==="p2p"){
+  const routes=["automatic","relay","bluetooth","wifi-direct"] as const;
+  const labels:{
+    [key:string]:{icon:string;title:string;subtitle:string}
+  }={
+    automatic:{icon:"🌐",title:"Automatic",subtitle:"Select the safest available route"},
+    relay:{icon:"🛡",title:"Prefer relay",subtitle:"Avoid direct peer addressing when possible"},
+    bluetooth:{icon:"📶",title:"Bluetooth",subtitle:"Requires native development build"},
+    "wifi-direct":{icon:"📡",title:"Wi-Fi Direct",subtitle:"Requires native development build"}
+  };
+
+  return <View style={s.flex}>
+    <Header title="Connections / P2P" subtitle="Privacy-first transport controls" onBack={onBack} theme={theme}/>
+    <ScrollView contentContainerStyle={s.form}>
+      <View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}>
+        <Text style={[s.sectionTitle,{color:theme.ink}]}>Preferred route</Text>
+        {routes.map(route=>(
+          <Row
+            key={route}
+            icon={labels[route].icon}
+            title={labels[route].title}
+            subtitle={labels[route].subtitle}
+            right={
+              <Switch
+                value={st.settings.p2pRoute===route}
+                onValueChange={()=>st.updateSettings({p2pRoute:route})}
+              />
+            }
+          />
+        ))}
+      </View>
+
+      <View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}>
+        <Row
+          icon="🔗"
+          title="Allow direct connections"
+          subtitle="Permit direct peer transport when supported"
+          right={
+            <Switch
+              value={!!st.settings.allowDirectP2P}
+              onValueChange={v=>st.updateSettings({allowDirectP2P:v})}
+            />
+          }
+        />
+
+        <Row
+          icon="👁"
+          title="Hide direct address"
+          subtitle="Do not expose direct network addressing"
+          right={
+            <Switch
+              value={st.settings.hideDirectAddress!==false}
+              onValueChange={v=>st.updateSettings({hideDirectAddress:v})}
+            />
+          }
+        />
+      </View>
+
+      <Text style={{color:theme.muted}}>
+        Expo Go can test these controls and local storage. Real Bluetooth,
+        Wi-Fi Direct and WebRTC transport require the native development build.
+      </Text>
+    </ScrollView>
+  </View>;
+}
 if(section==="blocked")return <View style={s.flex}><Header title="Blocked contacts" onBack={onBack} theme={theme}/><FlatList data={st.blockedIds} keyExtractor={x=>x} contentContainerStyle={s.form} ListEmptyComponent={<Text style={{color:theme.muted}}>No blocked contacts.</Text>} renderItem={({item})=><Row icon="🚫" title={item} right={<Button label="Unblock" secondary onPress={()=>st.unblock(item)}/>}/>} /></View>;
 if(section==="security")return <View style={s.flex}><Header title="Account & Security" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><PasscodeManager theme={theme}/><Button label="Verify with device biometrics" onPress={async()=>{const r=await LocalAuthentication.authenticateAsync({promptMessage:"Verify NexChat"});Alert.alert("Biometric verification",r.success?"Verified.":"Verification cancelled or failed.")}}/><Row icon="🔒" title="Biometric app lock" right={<Switch value={st.settings.biometricLock} onValueChange={v=>st.updateSettings({biometricLock:v})}/>} /><Row icon="📱" title="Trusted devices" subtitle="Device recovery architecture"/><Text style={{color:theme.muted}}>Recovery should prioritize device authentication and a user-created recovery PIN; phone OTP is optional rather than the primary identity mechanism.</Text></ScrollView></View>;
 return <View style={s.flex}><Header title={section} onBack={onBack} theme={theme}/><View style={s.empty}><Text style={{color:theme.muted}}>This section is reserved for the next native/service layer.</Text></View></View>}
