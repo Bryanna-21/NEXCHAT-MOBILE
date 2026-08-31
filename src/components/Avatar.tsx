@@ -1,13 +1,20 @@
 import React from "react";
-import { StyleSheet, Text, View } from "react-native";
+import {
+  Image,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { useTheme } from "../theme/ThemeProvider";
 
 export function Avatar({
   name,
+  uri,
   size = 48,
   online = false,
 }: {
   name: string;
+  uri?: string;
   size?: number;
   online?: boolean;
 }) {
@@ -21,15 +28,35 @@ export function Avatar({
         {
           width: size,
           height: size,
-          borderRadius: size * 0.34,
+          borderRadius: size / 2,
           backgroundColor: theme.surface,
           borderColor: theme.line,
         },
       ]}
     >
-      <Text style={[styles.text, { color: theme.brand, fontSize: size * 0.38 }]}>
-        {initial}
-      </Text>
+      {uri ? (
+        <Image
+          source={{ uri }}
+          style={{
+            width: size,
+            height: size,
+            borderRadius: size / 2,
+          }}
+        />
+      ) : (
+        <Text
+          style={[
+            styles.text,
+            {
+              color: theme.brand,
+              fontSize: size * 0.38,
+            },
+          ]}
+        >
+          {initial}
+        </Text>
+      )}
+
       {online && (
         <View
           style={[
@@ -54,10 +81,13 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderWidth: 1,
     position: "relative",
+    overflow: "visible",
   },
+
   text: {
     fontWeight: "900",
   },
+
   online: {
     position: "absolute",
     right: -1,

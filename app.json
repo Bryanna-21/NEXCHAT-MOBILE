@@ -13,7 +13,8 @@
       "bundleIdentifier": "com.nexchat.app"
     },
     "plugins": [
-      "expo-audio"
+      "expo-audio",
+      "expo-asset"
     ]
   }
 }
