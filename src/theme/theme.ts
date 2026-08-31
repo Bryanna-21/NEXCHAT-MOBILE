@@ -1,59 +1,61 @@
-import { useColorScheme } from "react-native";
-
-export type ThemeMode = "light" | "dark";
-
-export type AppTheme = {
-  mode: ThemeMode;
+export type Palette = {
   bg: string;
   card: string;
   surface: string;
   ink: string;
   muted: string;
   brand: string;
-  brand2: string;
   line: string;
   danger: string;
   good: string;
   inverse: string;
-  overlay: string;
+  bubbleMe: string;
+  bubbleThem: string;
 };
 
-export const lightTheme: AppTheme = {
-  mode: "light",
-  bg: "#F5F8FB",
-  card: "#FFFFFF",
-  surface: "#EEF4F8",
-  ink: "#102A43",
-  muted: "#66788A",
-  brand: "#0C5A8D",
-  brand2: "#167DB7",
-  line: "#D9E2EC",
-  danger: "#B42318",
-  good: "#087443",
-  inverse: "#FFFFFF",
-  overlay: "rgba(0,0,0,0.55)",
+export const themes: Record<"light" | "dark" | "black", Palette> = {
+  light: {
+    bg: "#F5F8FB",
+    card: "#FFFFFF",
+    surface: "#EEF3F7",
+    ink: "#102A43",
+    muted: "#66788A",
+    brand: "#0C5A8D",
+    line: "#D9E2EC",
+    danger: "#B42318",
+    good: "#16803C",
+    inverse: "#FFFFFF",
+    bubbleMe: "#D9F0FF",
+    bubbleThem: "#FFFFFF",
+  },
+
+  dark: {
+    bg: "#08111A",
+    card: "#101C27",
+    surface: "#172530",
+    ink: "#F2F7FA",
+    muted: "#9BAEBD",
+    brand: "#42A5E5",
+    line: "#263847",
+    danger: "#FF8A80",
+    good: "#4ADE80",
+    inverse: "#000000",
+    bubbleMe: "#0C4C70",
+    bubbleThem: "#172530",
+  },
+
+  black: {
+    bg: "#000000",
+    card: "#0A0A0A",
+    surface: "#111111",
+    ink: "#FFFFFF",
+    muted: "#A0A0A0",
+    brand: "#3FA9E8",
+    line: "#222222",
+    danger: "#FF6B6B",
+    good: "#4ADE80",
+    inverse: "#000000",
+    bubbleMe: "#123E57",
+    bubbleThem: "#111111",
+  },
 };
-
-export const darkTheme: AppTheme = {
-  mode: "dark",
-  bg: "#07131D",
-  card: "#0D1D29",
-  surface: "#132936",
-  ink: "#F4F8FB",
-  muted: "#9DB0BF",
-  brand: "#55B8F0",
-  brand2: "#79C9F5",
-  line: "#284150",
-  danger: "#FF8B82",
-  good: "#55D69A",
-  inverse: "#07131D",
-  overlay: "rgba(0,0,0,0.72)",
-};
-
-export function getTheme(mode: ThemeMode): AppTheme {
-  return mode === "dark" ? darkTheme : lightTheme;
-}
-
-export function useSystemTheme(): ThemeMode {
-  return useColorScheme() === "dark" ? "dark" : "light";
-}

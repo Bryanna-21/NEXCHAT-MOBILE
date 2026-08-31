@@ -11,7 +11,7 @@ export function Fab({
   onPress: () => void;
   accessibilityLabel?: string;
 }) {
-  const { theme } = useTheme();
+  const theme = useTheme();
 
   return (
     <TouchableOpacity

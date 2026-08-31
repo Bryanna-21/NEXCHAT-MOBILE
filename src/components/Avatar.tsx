@@ -11,7 +11,7 @@ export function Avatar({
   size?: number;
   online?: boolean;
 }) {
-  const { theme } = useTheme();
+  const theme = useTheme();
   const initial = (name.trim()[0] || "?").toUpperCase();
 
   return (

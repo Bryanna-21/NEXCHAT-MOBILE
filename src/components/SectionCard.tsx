@@ -13,7 +13,7 @@ export function SectionCard({
   action?: string;
   onPress?: () => void;
 }) {
-  const { theme } = useTheme();
+  const theme = useTheme();
 
   return (
     <View

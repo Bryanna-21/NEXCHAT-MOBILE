@@ -1,20 +1,12 @@
 {
   "expo": {
-    "name": "NexChat",
-    "slug": "nexchat-mobile",
-    "version": "0.1.0",
-    "orientation": "portrait",
-    "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
-    "ios": {
-      "supportsTablet": true
-    },
-    "android": {
-      "edgeToEdgeEnabled": true
-    },
-    "plugins": [
-      "expo-secure-store",
-      "expo-video"
-    ]
+    "name":"NexChat",
+    "slug":"nexchat",
+    "version":"0.2.0",
+    "orientation":"portrait",
+    "userInterfaceStyle":"automatic",
+    "scheme":"nexchat",
+    "android":{"package":"com.nexchat.app"},
+    "ios":{"bundleIdentifier":"com.nexchat.app"}
   }
 }

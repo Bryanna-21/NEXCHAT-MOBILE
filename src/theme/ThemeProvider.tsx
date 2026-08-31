@@ -1,40 +1,25 @@
-import React, { createContext, useContext, useMemo, useState } from "react";
-import { AppTheme, getTheme, ThemeMode, useSystemTheme } from "./theme";
+import React, { createContext, useContext } from "react";
+import { themes } from "./theme";
 
-type ThemeContextValue = {
+export type ThemeMode = "light" | "dark" | "black";
+export type NexChatTheme = (typeof themes)[ThemeMode];
+
+const Ctx = createContext<NexChatTheme>(themes.light);
+
+export function ThemeProvider({
+  mode,
+  children,
+}: {
   mode: ThemeMode;
-  theme: AppTheme;
-  toggle: () => void;
-};
-
-const ThemeContext = createContext<ThemeContextValue | null>(null);
-
-export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const systemTheme = useSystemTheme();
-  const [mode, setMode] = useState<ThemeMode>(systemTheme);
-
-  const value = useMemo<ThemeContextValue>(() => ({
-    mode,
-    theme: getTheme(mode),
-    toggle: () =>
-      setMode((current: ThemeMode) =>
-        current === "dark" ? "light" : "dark"
-      ),
-  }), [mode]);
-
+  children: React.ReactNode;
+}) {
   return (
-    <ThemeContext.Provider value={value}>
+    <Ctx.Provider value={themes[mode]}>
       {children}
-    </ThemeContext.Provider>
+    </Ctx.Provider>
   );
 }
 
-export function useTheme(): ThemeContextValue {
-  const context = useContext(ThemeContext);
-
-  if (!context) {
-    throw new Error("useTheme must be used inside ThemeProvider");
-  }
-
-  return context;
+export function useTheme(): NexChatTheme {
+  return useContext(Ctx);
 }
