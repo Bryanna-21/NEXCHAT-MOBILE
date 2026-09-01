@@ -1,9 +1,11 @@
 import { useSyncExternalStore } from "react";
 import { readVault, saveVault, clearVault } from "./vault";
+import { deleteAttachmentIfUnreferenced } from "./attachmentLifecycle";
+import { attachmentExists } from "./attachmentStore";
 
 /* =========================================================
    NEXCHAT STORE
-   Compatibility-complete local-first state model.
+   Local-first state model.
    ========================================================= */
 
 export type MessageStatus =
@@ -35,10 +37,7 @@ export type Attachment = {
 export type Message = {
   id: string;
 
-  /* Current canonical field */
   senderId: string;
-
-  /* Compatibility field used by older UI code */
   sender: string;
 
   recipientId: string;
@@ -51,11 +50,21 @@ export type Message = {
 
   attachment?: Attachment;
 
+  /* Reply / forwarding */
+  replyToId?: string;
+  forwarded?: boolean;
+
+  /* Saved/starred */
+  starred?: boolean;
+
+  /* View once */
   viewOnce?: boolean;
   viewedAt?: string;
 
+  /* Expiration */
   expiresAt?: string;
 
+  /* Deletion */
   deletedForEveryone?: boolean;
   deletedForMe?: boolean;
 };
@@ -65,10 +74,6 @@ export type NexContact = {
   displayName: string;
   username?: string;
 
-  /*
-   * Keep both names because different UI components currently
-   * reference different versions of the profile model.
-   */
   avatar?: string;
   avatarUri?: string;
 
@@ -117,6 +122,10 @@ export type AppSettings = {
     | "trusted-device"
     | "cloud";
 
+  lastBackupRunAt?: string;
+  lastBackupAttemptAt?: string;
+  lastBackupError?: string;
+
   readReceipts: boolean;
   lastSeen: boolean;
   onlineStatus: boolean;
@@ -129,8 +138,12 @@ export type AppSettings = {
 
   biometricLock: boolean;
 
-  // P2P / connection controls
-  p2pRoute: "automatic" | "relay" | "wifi-direct" | "bluetooth";
+  p2pRoute:
+    | "automatic"
+    | "relay"
+    | "wifi-direct"
+    | "bluetooth";
+
   allowDirectP2P: boolean;
   hideDirectAddress: boolean;
 };
@@ -172,7 +185,6 @@ const defaults: AppSettings = {
 
   biometricLock: false,
 
-  // Privacy-first P2P defaults
   p2pRoute: "automatic",
   allowDirectP2P: false,
   hideDirectAddress: true,
@@ -206,8 +218,21 @@ function findConversation(
   peerId: string
 ): Conversation | undefined {
   return state.conversations.find(
-    (conversation) => conversation.peerId === peerId
+    (conversation) =>
+      conversation.peerId === peerId
   );
+}
+
+/**
+ * Read the current persisted settings directly, without going
+ * through the React hook.
+ *
+ * Used for startup logic (like checking whether a scheduled
+ * backup is due) that runs before/outside a component render
+ * and cannot wait for a hook snapshot to catch up.
+ */
+export function getPersistedSettingsSnapshot(): AppSettings {
+  return state.settings;
 }
 
 function makeMessage(
@@ -217,33 +242,34 @@ function makeMessage(
   options?: {
     viewOnce?: boolean;
     disappearingSeconds?: number;
+    replyToId?: string;
+    forwarded?: boolean;
   }
 ): Message {
   const now = new Date().toISOString();
 
   const disappearingSeconds =
     options?.disappearingSeconds ??
-    findConversation(peerId)?.disappearingSeconds ??
+    findConversation(peerId)
+      ?.disappearingSeconds ??
     state.settings.defaultDisappearingSeconds;
 
   const expiresAt =
     disappearingSeconds > 0
       ? new Date(
-          Date.now() + disappearingSeconds * 1000
+          Date.now() +
+            disappearingSeconds * 1000
         ).toISOString()
       : undefined;
 
   return {
-    id: `msg-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2, 10)}`,
+    id:
+      `msg-${Date.now()}-` +
+      Math.random()
+        .toString(36)
+        .slice(2, 10),
 
     senderId: "me",
-
-    /*
-     * Existing App.tsx checks sender === "me".
-     * Preserve it until the UI is migrated completely.
-     */
     sender: "me",
 
     recipientId: peerId,
@@ -256,6 +282,12 @@ function makeMessage(
 
     attachment,
 
+    replyToId:
+      options?.replyToId,
+
+    forwarded:
+      options?.forwarded,
+
     viewOnce:
       options?.viewOnce ??
       state.settings.defaultViewOnce,
@@ -267,45 +299,50 @@ function makeMessage(
 function queuePersist(
   next: Partial<PersistedState>
 ): Promise<void> {
-  writeChain = writeChain.then(async () => {
-    const current: PersistedState = {
-      conversations: state.conversations,
-      contacts: state.contacts,
-      settings: state.settings,
-      blockedIds: state.blockedIds,
-    };
+  writeChain = writeChain.then(
+    async () => {
+      const current: PersistedState = {
+        conversations:
+          state.conversations,
+        contacts: state.contacts,
+        settings: state.settings,
+        blockedIds: state.blockedIds,
+      };
 
-    const merged: PersistedState = {
-      ...current,
-      ...next,
-    };
+      const merged: PersistedState = {
+        ...current,
+        ...next,
+      };
 
-    state = {
-      ...state,
-      ...merged,
-      vaultBytes: JSON.stringify(merged).length,
-    };
+      state = {
+        ...state,
+        ...merged,
+        vaultBytes:
+          JSON.stringify(merged).length,
+      };
 
-    await saveVault(merged);
+      await saveVault(merged);
 
-    emit();
-  });
+      emit();
+    }
+  );
 
   return writeChain;
 }
 
 export function useNexChatStore() {
-  const snapshot = useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
+  const snapshot =
+    useSyncExternalStore(
+      (listener) => {
+        listeners.add(listener);
 
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-    () => state,
-    () => state
-  );
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+      () => state,
+      () => state
+    );
 
   return {
     ...snapshot,
@@ -320,17 +357,25 @@ export function useNexChatStore() {
 
       state = {
         ...state,
-        conversations: data.conversations ?? [],
+
+        conversations:
+          data.conversations ?? [],
+
         contacts:
           data.contacts?.length
             ? data.contacts
             : [demo],
+
         settings: {
           ...defaults,
           ...(data.settings ?? {}),
         },
-        blockedIds: data.blockedIds ?? [],
-        vaultBytes: JSON.stringify(data).length,
+
+        blockedIds:
+          data.blockedIds ?? [],
+
+        vaultBytes:
+          JSON.stringify(data).length,
       };
 
       emit();
@@ -339,18 +384,24 @@ export function useNexChatStore() {
     ensureConversation: async (
       peerId: string
     ): Promise<Conversation> => {
-      const existing = findConversation(peerId);
+      const existing =
+        findConversation(peerId);
 
       if (existing) {
         return existing;
       }
 
       const conversation: Conversation = {
-        id: `conv-${Date.now()}-${peerId}`,
+        id:
+          `conv-${Date.now()}-${peerId}`,
+
         peerId,
+
         messages: [],
+
         disappearingSeconds:
-          state.settings.defaultDisappearingSeconds,
+          state.settings
+            .defaultDisappearingSeconds,
       };
 
       await queuePersist({
@@ -370,50 +421,90 @@ export function useNexChatStore() {
       options?: {
         viewOnce?: boolean;
         disappearingSeconds?: number;
+        replyToId?: string;
+        forwarded?: boolean;
       }
     ): Promise<void> => {
-      if (state.blockedIds.includes(peerId)) {
+      if (
+        state.blockedIds.includes(peerId)
+      ) {
         throw new Error(
           "This contact is blocked."
         );
       }
 
-      let conversation = findConversation(peerId);
+      /*
+       * Attachment integrity boundary.
+       *
+       * Every message attachment must already exist in the
+       * durable attachment store before the message reference
+       * is persisted.
+       *
+       * Forwarded messages intentionally reuse the same
+       * attachment ID, so this verification also protects
+       * forwarded references without duplicating the file.
+       */
+      if (attachment?.id) {
+        const exists =
+          await attachmentExists(
+            attachment.id,
+          );
+
+        if (!exists) {
+          throw new Error(
+            "Attachment is no longer available.",
+          );
+        }
+      }
+
+      let conversation =
+        findConversation(peerId);
 
       if (!conversation) {
         conversation = {
-          id: `conv-${Date.now()}-${peerId}`,
+          id:
+            `conv-${Date.now()}-${peerId}`,
+
           peerId,
+
           messages: [],
+
           disappearingSeconds:
-            state.settings.defaultDisappearingSeconds,
+            state.settings
+              .defaultDisappearingSeconds,
         };
       }
 
-      const message = makeMessage(
-        peerId,
-        text,
-        attachment,
-        options
-      );
+      const message =
+        makeMessage(
+          peerId,
+          text,
+          attachment,
+          options
+        );
 
-      const updatedConversation: Conversation = {
-        ...conversation,
-        messages: [
-          ...conversation.messages,
-          message,
-        ],
-      };
+      const updatedConversation: Conversation =
+        {
+          ...conversation,
 
-      const exists = state.conversations.some(
-        (c) => c.peerId === peerId
-      );
+          messages: [
+            ...conversation.messages,
+            message,
+          ],
+        };
+
+      const exists =
+        state.conversations.some(
+          (c) =>
+            c.peerId === peerId
+        );
 
       const conversations = exists
-        ? state.conversations.map((c) =>
-            c.peerId === peerId
-              ? updatedConversation
-              : c
+        ? state.conversations.map(
+            (c) =>
+              c.peerId === peerId
+                ? updatedConversation
+                : c
           )
         : [
             updatedConversation,
@@ -439,21 +530,25 @@ export function useNexChatStore() {
 
       await queuePersist({
         conversations:
-          state.conversations.map((conversation) => ({
-            ...conversation,
+          state.conversations.map(
+            (conversation) => ({
+              ...conversation,
 
-            messages:
-              conversation.messages.map((message) =>
-                message.id === id
-                  ? {
-                      ...message,
-                      text: cleaned,
-                      editedAt:
-                        new Date().toISOString(),
-                    }
-                  : message
-              ),
-          })),
+              messages:
+                conversation.messages.map(
+                  (message) =>
+                    message.id === id
+                      ? {
+                          ...message,
+                          text: cleaned,
+                          editedAt:
+                            new Date()
+                              .toISOString(),
+                        }
+                      : message
+                ),
+            })
+          ),
       });
     },
 
@@ -461,37 +556,86 @@ export function useNexChatStore() {
       id: string,
       forEveryone = false
     ): Promise<void> => {
-      await queuePersist({
-        conversations:
-          state.conversations.map((conversation) => ({
+      const currentConversations =
+        state.conversations;
+
+      const targetMessage =
+        currentConversations
+          .flatMap(
+            conversation =>
+              conversation.messages
+          )
+          .find(
+            message =>
+              message.id === id
+          );
+
+      const removedAttachmentId =
+        targetMessage?.attachment?.id;
+
+      const nextConversations =
+        currentConversations.map(
+          conversation => ({
             ...conversation,
 
             messages:
-              conversation.messages.map((message) =>
-                message.id === id
-                  ? {
-                      ...message,
+              conversation.messages.map(
+                message =>
+                  message.id === id
+                    ? {
+                        ...message,
 
-                      text: forEveryone
-                        ? "This message was deleted"
-                        : message.text,
+                        text:
+                          forEveryone
+                            ? "This message was deleted"
+                            : message.text,
 
-                      attachment:
-                        undefined,
+                        attachment:
+                          undefined,
 
-                      ...(forEveryone
-                        ? {
-                            deletedForEveryone:
-                              true,
-                          }
-                        : {
-                            deletedForMe: true,
-                          }),
-                    }
-                  : message
+                        ...(forEveryone
+                          ? {
+                              deletedForEveryone:
+                                true,
+                            }
+                          : {
+                              deletedForMe:
+                                true,
+                            }),
+                      }
+                    : message
               ),
-          })),
+          })
+        );
+
+      await queuePersist({
+        conversations:
+          nextConversations,
       });
+
+      /*
+       * The new state has been persisted successfully.
+       * Only now is the removed attachment eligible for
+       * physical deletion.
+       *
+       * Reference-aware cleanup protects forwarded messages
+       * and any other message sharing the same attachment ID.
+       */
+      if (removedAttachmentId) {
+        try {
+          await deleteAttachmentIfUnreferenced(
+            removedAttachmentId,
+            nextConversations
+          );
+        } catch {
+          /*
+           * Physical cleanup is best-effort.
+           *
+           * The message deletion itself has already succeeded.
+           * A later reconciliation pass can remove the orphan.
+           */
+        }
+      }
     },
 
     markViewOnce: async (
@@ -499,20 +643,189 @@ export function useNexChatStore() {
     ): Promise<void> => {
       await queuePersist({
         conversations:
-          state.conversations.map((conversation) => ({
-            ...conversation,
+          state.conversations.map(
+            (conversation) => ({
+              ...conversation,
 
-            messages:
-              conversation.messages.map((message) =>
-                message.id === id
-                  ? {
-                      ...message,
-                      viewedAt:
-                        new Date().toISOString(),
-                    }
-                  : message
-              ),
-          })),
+              messages:
+                conversation.messages.map(
+                  (message) =>
+                    message.id === id
+                      ? {
+                          ...message,
+                          viewedAt:
+                            new Date()
+                              .toISOString(),
+                        }
+                      : message
+                ),
+            })
+          ),
+      });
+    },
+
+    toggleStarMessage: async (
+      id: string
+    ): Promise<void> => {
+      await queuePersist({
+        conversations:
+          state.conversations.map(
+            (conversation) => ({
+              ...conversation,
+
+              messages:
+                conversation.messages.map(
+                  (message) =>
+                    message.id === id
+                      ? {
+                          ...message,
+                          starred:
+                            !message.starred,
+                        }
+                      : message
+                ),
+            })
+          ),
+      });
+    },
+
+    replyToMessage: async (
+      peerId: string,
+      replyToId: string,
+      text: string
+    ): Promise<void> => {
+      await (
+        useNexChatStore as any
+      );
+
+      const cleaned = text.trim();
+
+      if (!cleaned) {
+        throw new Error(
+          "Message cannot be empty."
+        );
+      }
+
+      await queuePersist({
+        conversations:
+          state.conversations.map(
+            (conversation) => {
+              if (
+                conversation.peerId !==
+                peerId
+              ) {
+                return conversation;
+              }
+
+              const message =
+                makeMessage(
+                  peerId,
+                  cleaned,
+                  undefined,
+                  {
+                    replyToId,
+                  }
+                );
+
+              return {
+                ...conversation,
+                messages: [
+                  ...conversation.messages,
+                  message,
+                ],
+              };
+            }
+          ),
+      });
+    },
+
+    forwardMessage: async (
+      sourceMessage: Message,
+      peerId: string
+    ): Promise<void> => {
+      if (
+        state.blockedIds.includes(peerId)
+      ) {
+        throw new Error(
+          "This contact is blocked."
+        );
+      }
+
+      /*
+       * Forwarding reuses the original attachment ID.
+       * Verify the physical attachment still exists before
+       * persisting another message reference to it.
+       */
+      if (sourceMessage.attachment?.id) {
+        const exists =
+          await attachmentExists(
+            sourceMessage.attachment.id,
+          );
+
+        if (!exists) {
+          throw new Error(
+            "The attachment being forwarded is no longer available.",
+          );
+        }
+      }
+
+      let conversation =
+        findConversation(peerId);
+
+      if (!conversation) {
+        conversation = {
+          id:
+            `conv-${Date.now()}-${peerId}`,
+
+          peerId,
+
+          messages: [],
+
+          disappearingSeconds:
+            state.settings
+              .defaultDisappearingSeconds,
+        };
+      }
+
+      const forwarded =
+        makeMessage(
+          peerId,
+          sourceMessage.text,
+          sourceMessage.attachment,
+          {
+            forwarded: true,
+          }
+        );
+
+      const updatedConversation = {
+        ...conversation,
+
+        messages: [
+          ...conversation.messages,
+          forwarded,
+        ],
+      };
+
+      const exists =
+        state.conversations.some(
+          (c) =>
+            c.peerId === peerId
+        );
+
+      const conversations = exists
+        ? state.conversations.map(
+            (c) =>
+              c.peerId === peerId
+                ? updatedConversation
+                : c
+          )
+        : [
+            updatedConversation,
+            ...state.conversations,
+          ];
+
+      await queuePersist({
+        conversations,
       });
     },
 
@@ -522,13 +835,15 @@ export function useNexChatStore() {
     ): Promise<void> => {
       await queuePersist({
         conversations:
-          state.conversations.map((conversation) =>
-            conversation.peerId === peerId
-              ? {
-                  ...conversation,
-                  pinned,
-                }
-              : conversation
+          state.conversations.map(
+            (conversation) =>
+              conversation.peerId ===
+              peerId
+                ? {
+                    ...conversation,
+                    pinned,
+                  }
+                : conversation
           ),
       });
     },
@@ -539,13 +854,15 @@ export function useNexChatStore() {
     ): Promise<void> => {
       await queuePersist({
         conversations:
-          state.conversations.map((conversation) =>
-            conversation.peerId === peerId
-              ? {
-                  ...conversation,
-                  archived,
-                }
-              : conversation
+          state.conversations.map(
+            (conversation) =>
+              conversation.peerId ===
+              peerId
+                ? {
+                    ...conversation,
+                    archived,
+                  }
+                : conversation
           ),
       });
     },
@@ -556,15 +873,91 @@ export function useNexChatStore() {
     ): Promise<void> => {
       await queuePersist({
         conversations:
-          state.conversations.map((conversation) =>
-            conversation.peerId === peerId
-              ? {
-                  ...conversation,
-                  ...patch,
-                }
-              : conversation
+          state.conversations.map(
+            (conversation) =>
+              conversation.peerId ===
+              peerId
+                ? {
+                    ...conversation,
+                    ...patch,
+                  }
+                : conversation
           ),
       });
+    },
+
+    clearConversation: async (
+      peerId: string
+    ): Promise<void> => {
+      const conversation =
+        findConversation(peerId);
+
+      if (!conversation) {
+        return;
+      }
+
+      const attachmentIds =
+        new Set<string>();
+
+      for (
+        const message
+        of conversation.messages
+      ) {
+        const attachment =
+          message.attachment;
+
+        if (attachment?.id) {
+          attachmentIds.add(
+            attachment.id
+          );
+        }
+      }
+
+      const nextConversations =
+        state.conversations.map(
+          current =>
+            current.peerId === peerId
+              ? {
+                  ...current,
+                  messages: [],
+                }
+              : current
+        );
+
+      /*
+       * Persist the destructive state change first.
+       *
+       * If persistence fails, no physical attachment is
+       * removed and the previous conversation remains intact.
+       */
+      await queuePersist({
+        conversations:
+          nextConversations,
+      });
+
+      /*
+       * Physical deletion happens only after the new state
+       * has been persisted.
+       *
+       * The reference-aware lifecycle layer protects files
+       * that are still used by another message.
+       */
+      for (const attachmentId of attachmentIds) {
+        try {
+          await deleteAttachmentIfUnreferenced(
+            attachmentId,
+            nextConversations
+          );
+        } catch {
+          /*
+           * Best-effort physical cleanup.
+           *
+           * The chat itself has already been cleared.
+           * A future reconciliation pass can remove any
+           * attachment whose cleanup failed here.
+           */
+        }
+      }
     },
 
     updateSettings: async (
@@ -582,22 +975,24 @@ export function useNexChatStore() {
       id: string
     ): Promise<void> => {
       await queuePersist({
-        blockedIds: Array.from(
-          new Set([
-            ...state.blockedIds,
-            id,
-          ])
-        ),
+        blockedIds:
+          Array.from(
+            new Set([
+              ...state.blockedIds,
+              id,
+            ])
+          ),
 
-        contacts: state.contacts.map(
-          (contact) =>
-            contact.id === id
-              ? {
-                  ...contact,
-                  blocked: true,
-                }
-              : contact
-        ),
+        contacts:
+          state.contacts.map(
+            (contact) =>
+              contact.id === id
+                ? {
+                    ...contact,
+                    blocked: true,
+                  }
+                : contact
+          ),
       });
     },
 
@@ -611,15 +1006,16 @@ export function useNexChatStore() {
               blockedId !== id
           ),
 
-        contacts: state.contacts.map(
-          (contact) =>
-            contact.id === id
-              ? {
-                  ...contact,
-                  blocked: false,
-                }
-              : contact
-        ),
+        contacts:
+          state.contacts.map(
+            (contact) =>
+              contact.id === id
+                ? {
+                    ...contact,
+                    blocked: false,
+                  }
+                : contact
+          ),
       });
     },
 
@@ -637,9 +1033,11 @@ export function useNexChatStore() {
 
       const normalized: NexContact = {
         ...contact,
+
         avatar:
           contact.avatar ??
           contact.avatarUri,
+
         avatarUri:
           contact.avatarUri ??
           contact.avatar,
