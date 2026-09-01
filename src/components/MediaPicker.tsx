@@ -6,6 +6,7 @@ import {
   View,
 } from "react-native";
 import {
+  capturePhoto,
   pickFiles,
   pickMedia,
 } from "../core/media";
@@ -35,6 +36,23 @@ export function MediaPicker({
     }
   };
 
+  const takePhoto = async () => {
+    try {
+      const item = await capturePhoto();
+
+      if (item) {
+        onSelected([item]);
+      }
+    } catch (e) {
+      Alert.alert(
+        "Camera unavailable",
+        e instanceof Error
+          ? e.message
+          : "Unable to access the camera.",
+      );
+    }
+  };
+
   const chooseFiles = async () => {
     try {
       const items = await pickFiles(true);
@@ -57,6 +75,14 @@ export function MediaPicker({
       "Add attachment",
       "Choose what you want to send.",
       [
+        {
+          text: "Camera",
+          onPress: takePhoto,
+        },
+        {
+          text: "Camera",
+          onPress: takePhoto,
+        },
         {
           text: "Photos / Videos",
           onPress: chooseMedia,

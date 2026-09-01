@@ -2,15 +2,6 @@ import { useSyncExternalStore } from "react";
 import { readVault, saveVault, clearVault } from "./vault";
 import { deleteAttachmentIfUnreferenced } from "./attachmentLifecycle";
 import { attachmentExists } from "./attachmentStore";
-import {
-  createTransportEnvelope,
-} from "./transport/protocol";
-import { LocalTransport } from "./transport/local";
-import { TransportRouter } from "./transport/router";
-import {
-  transition,
-  messageStatusFromDelivery,
-} from "./transport/delivery";
 
 /* =========================================================
    NEXCHAT STORE
@@ -56,8 +47,6 @@ export type Message = {
   editedAt?: string;
 
   status: MessageStatus;
-
-  transportQueueId?: string;
 
   attachment?: Attachment;
 
@@ -217,20 +206,6 @@ let state: {
 
 const listeners = new Set<() => void>();
 
-function getTransportRouter(): TransportRouter {
-  return new TransportRouter({
-    transports: [
-      new LocalTransport(),
-    ],
-    settings: {
-      preferredRoute:
-        state.settings.p2pRoute,
-      allowDirect:
-        state.settings.allowDirectP2P,
-    },
-  });
-}
-
 let writeChain: Promise<void> = Promise.resolve();
 
 function emit(): void {
@@ -258,14 +233,6 @@ function findConversation(
  */
 export function getPersistedSettingsSnapshot(): AppSettings {
   return state.settings;
-}
-
-function encodeTransportPayload(
-  message: Message,
-): Uint8Array {
-  return new TextEncoder().encode(
-    JSON.stringify(message),
-  );
 }
 
 function makeMessage(
@@ -516,88 +483,13 @@ export function useNexChatStore() {
           options
         );
 
-      let deliveryState =
-        transition(
-          "created",
-          "sending",
-        );
-
-      const sendingMessage: Message = {
-        ...message,
-        status: "sending",
-      };
-
-      const envelope =
-        createTransportEnvelope(
-          "me",
-          peerId,
-          encodeTransportPayload(
-            sendingMessage,
-          ),
-          sendingMessage.id,
-        );
-
-      envelope.ttl = 7 * 24 * 60 * 60 * 1000;
-
-      let transportResult;
-
-      try {
-        transportResult =
-          await getTransportRouter().send(
-            envelope,
-          );
-      } catch (error) {
-        transition(
-          deliveryState,
-          "failed",
-        );
-
-        throw error;
-      }
-
-      if (transportResult.delivered) {
-        deliveryState =
-          transition(
-            deliveryState,
-            "sent",
-          );
-
-        deliveryState =
-          transition(
-            deliveryState,
-            "delivered",
-          );
-      } else if (transportResult.queued) {
-        deliveryState =
-          transition(
-            deliveryState,
-            "queued",
-          );
-      } else {
-        deliveryState =
-          transition(
-            deliveryState,
-            "failed",
-          );
-      }
-
-      const finalMessage: Message = {
-        ...sendingMessage,
-        status:
-          messageStatusFromDelivery(
-            deliveryState,
-          ),
-        transportQueueId:
-          transportResult.queueId,
-      };
-
       const updatedConversation: Conversation =
         {
           ...conversation,
 
           messages: [
             ...conversation.messages,
-            finalMessage,
+            message,
           ],
         };
 

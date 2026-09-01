@@ -106,6 +106,64 @@ export async function pickMedia(
 }
 
 /**
+ * Capture a photo using the device camera.
+ *
+ * The captured image is immediately moved into the
+ * NexChat durable attachment store, just like gallery
+ * media. This keeps camera media on the same lifecycle
+ * as every other chat attachment.
+ */
+export async function capturePhoto(): Promise<Attachment | null> {
+  const permission =
+    await ImagePicker.requestCameraPermissionsAsync();
+
+  if (!permission.granted) {
+    throw new Error(
+      "Camera permission is required to take a photo.",
+    );
+  }
+
+  const result =
+    await ImagePicker.launchCameraAsync({
+      mediaTypes: ["images"],
+      allowsEditing: false,
+      quality: 1,
+    });
+
+  if (
+    result.canceled ||
+    !result.assets.length
+  ) {
+    return null;
+  }
+
+  const asset = result.assets[0];
+
+  const resultIngested =
+    await ingestAttachment({
+      uri: asset.uri,
+      type: "image",
+      name:
+        asset.fileName ||
+        `camera-${Date.now()}.jpg`,
+      mimeType:
+        asset.mimeType ||
+        "image/jpeg",
+      size:
+        asset.fileSize ||
+        undefined,
+      width:
+        asset.width ||
+        undefined,
+      height:
+        asset.height ||
+        undefined,
+    });
+
+  return resultIngested.attachment;
+}
+
+/**
  * Pick arbitrary files from the device.
  *
  * The selected file is copied into durable

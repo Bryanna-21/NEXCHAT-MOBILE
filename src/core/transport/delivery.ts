@@ -13,8 +13,8 @@ const transitions: Record<
 > = {
   created: ["queued", "sending", "failed"],
   queued: ["sending", "failed"],
-  sending: ["sent", "queued", "failed"],
-  sent: ["delivered", "failed"],
+  sending: ["sent", "delivered", "queued", "failed"],
+  sent: ["delivered", "read", "failed"],
   delivered: ["read"],
   read: [],
   failed: ["queued", "sending"],
@@ -25,6 +25,15 @@ export function canTransition(
   to: DeliveryState,
 ): boolean {
   return transitions[from].includes(to);
+}
+
+export function tryTransition(
+  from: DeliveryState,
+  to: DeliveryState,
+): DeliveryState {
+  return canTransition(from, to)
+    ? to
+    : from;
 }
 
 export function transition(
@@ -40,8 +49,50 @@ export function transition(
   return to;
 }
 
+export function normalizeDeliveryState(
+  state: DeliveryState,
+): DeliveryState {
+  if (state === "created") {
+    return "queued";
+  }
+
+  return state;
+}
+
+export function isSendComplete(
+  state: DeliveryState,
+): boolean {
+  return (
+    state === "sent" ||
+    state === "delivered" ||
+    state === "read"
+  );
+}
+
 export function isTerminal(
   state: DeliveryState,
 ): boolean {
-  return state === "read" || state === "failed";
+  return state === "read";
+}
+
+export function messageStatusFromDelivery(
+  state: DeliveryState,
+): "sending" | "sent" | "delivered" | "failed" {
+  switch (state) {
+    case "sent":
+      return "sent";
+
+    case "delivered":
+      return "delivered";
+
+    case "failed":
+      return "failed";
+
+    case "created":
+    case "queued":
+    case "sending":
+    case "read":
+    default:
+      return "sending";
+  }
 }

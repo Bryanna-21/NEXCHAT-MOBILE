@@ -6,7 +6,6 @@ import {
 
 import {
   enqueue,
-  markDelivered,
 } from "./queue";
 
 export class LocalTransport
@@ -24,14 +23,17 @@ export class LocalTransport
     const item = enqueue(
       envelope.recipientId,
       envelope.payload,
+      envelope.messageId,
     );
 
-    markDelivered(item.id);
+    envelope.queueId = item.id;
 
     return {
       transport: this.kind,
-      delivered: true,
-      queued: false,
+      delivered: false,
+      queued: true,
+      queueId:
+        envelope.queueId ?? item.id,
     };
   }
 }

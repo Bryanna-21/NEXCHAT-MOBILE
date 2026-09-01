@@ -1,0 +1,87 @@
+import * as FileSystem from "expo-file-system/legacy";
+
+export interface StoredAttachment {
+  id: string;
+  type: "image" | "video" | "audio" | "file";
+  uri: string;
+  name?: string;
+  mimeType?: string;
+  size?: number;
+  createdAt: string;
+}
+
+const ROOT =
+  `${FileSystem.documentDirectory || FileSystem.cacheDirectory || ""}nexchat-attachments/`;
+
+async function ensureRoot(): Promise<void> {
+  if (!ROOT) {
+    throw new Error(
+      "NexChat attachment storage directory is unavailable.",
+    );
+  }
+
+  const info =
+    await FileSystem.getInfoAsync(ROOT);
+
+  if (!info.exists) {
+    await FileSystem.makeDirectoryAsync(ROOT, {
+      intermediates: true,
+    });
+  }
+}
+
+export async function storeAttachment(
+  attachment: StoredAttachment,
+): Promise<StoredAttachment> {
+  await ensureRoot();
+
+  const destination =
+    `${ROOT}${sanitize(attachment.id)}`;
+
+  if (attachment.uri !== destination) {
+    await FileSystem.copyAsync({
+      from: attachment.uri,
+      to: destination,
+    });
+  }
+
+  return {
+    ...attachment,
+    uri: destination,
+  };
+}
+
+export async function attachmentExists(
+  id: string,
+): Promise<boolean> {
+  await ensureRoot();
+
+  const info =
+    await FileSystem.getInfoAsync(
+      `${ROOT}${sanitize(id)}`,
+    );
+
+  return info.exists;
+}
+
+export async function deleteAttachment(
+  id: string,
+): Promise<void> {
+  await ensureRoot();
+
+  const uri =
+    `${ROOT}${sanitize(id)}`;
+
+  const info =
+    await FileSystem.getInfoAsync(uri);
+
+  if (info.exists) {
+    await FileSystem.deleteAsync(uri, {
+      idempotent: true,
+    });
+  }
+}
+
+function sanitize(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "_");
+}

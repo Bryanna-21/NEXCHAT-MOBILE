@@ -3,6 +3,7 @@ import {
   TransportEnvelope,
   TransportKind,
   TransportResult,
+  isValidTransportEnvelope,
 } from "./protocol";
 
 export type RoutePreference =
@@ -35,6 +36,29 @@ export class TransportRouter {
   async send(
     envelope: TransportEnvelope,
   ): Promise<TransportResult> {
+    if (!isValidTransportEnvelope(envelope)) {
+      return {
+        transport: "local",
+        delivered: false,
+        queued: false,
+        error: "Invalid transport envelope.",
+      };
+    }
+
+    if (
+      envelope.ttl !== undefined &&
+      Date.now() >
+        new Date(envelope.createdAt).getTime() +
+          envelope.ttl
+    ) {
+      return {
+        transport: "local",
+        delivered: false,
+        queued: false,
+        error: "Transport envelope expired.",
+      };
+    }
+
     const candidates =
       this.orderedTransports();
 
@@ -56,7 +80,12 @@ export class TransportRouter {
           result.delivered ||
           result.queued
         ) {
-          return result;
+          return {
+            ...result,
+            queueId:
+              result.queueId ??
+              envelope.queueId,
+          };
         }
 
         if (result.error) {

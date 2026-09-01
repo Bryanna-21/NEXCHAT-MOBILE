@@ -8,9 +8,11 @@ export interface QueueItem {
   id: string;
   recipientId: string;
   createdAt: string;
+  messageId?: string;
   payload: string;
   attempts: number;
   state: QueueItemState;
+  maxAttempts: number;
   lastAttemptAt?: string;
   lastError?: string;
 }
@@ -43,6 +45,7 @@ export function decodePayload(
 export function enqueue(
   recipientId: string,
   payload: Uint8Array,
+  messageId?: string,
 ): QueueItem {
   const item: QueueItem = {
     id:
@@ -51,9 +54,11 @@ export function enqueue(
         .slice(2, 10)}`,
     recipientId,
     createdAt: new Date().toISOString(),
+    messageId,
     payload: encodePayload(payload),
     attempts: 0,
     state: "queued",
+    maxAttempts: 5,
   };
 
   queue.push(item);
@@ -61,8 +66,74 @@ export function enqueue(
   return { ...item };
 }
 
+export function getPendingItems(): QueueItem[] {
+  return queue
+    .filter(
+      item =>
+        item.state === "queued" ||
+        item.state === "sending",
+    )
+    .map(item => ({ ...item }));
+}
+
+export function getFailedItems(): QueueItem[] {
+  return queue
+    .filter(
+      item =>
+        item.state === "failed" &&
+        item.attempts < item.maxAttempts,
+    )
+    .map(item => ({ ...item }));
+}
+
 export function getQueuedItems(): QueueItem[] {
   return queue.map(item => ({ ...item }));
+}
+
+export function canRetry(
+  id: string,
+): boolean {
+  const item = queue.find(
+    candidate => candidate.id === id,
+  );
+
+  if (!item) {
+    return false;
+  }
+
+  return (
+    (
+      item.state === "queued" ||
+      item.state === "failed"
+    ) &&
+    item.attempts < item.maxAttempts
+  );
+}
+
+export function getQueueItem(
+  id: string,
+): QueueItem | undefined {
+  const item = queue.find(
+    candidate => candidate.id === id,
+  );
+
+  return item
+    ? { ...item }
+    : undefined;
+}
+
+export function getQueueItemForMessage(
+  messageId: string,
+): QueueItem | undefined {
+  const item = queue.find(
+    candidate =>
+      candidate.messageId === messageId &&
+      candidate.state !== "delivered",
+  );
+
+  return item
+    ? { ...item }
+    : undefined;
 }
 
 export function getQueuedForPeer(
@@ -84,6 +155,20 @@ export function markSending(id: string): void {
 
   if (!item) return;
 
+  if (
+    item.state !== "queued" &&
+    item.state !== "failed"
+  ) {
+    return;
+  }
+
+  if (item.attempts >= item.maxAttempts) {
+    item.state = "failed";
+    item.lastError =
+      "Maximum delivery attempts reached.";
+    return;
+  }
+
   item.state = "sending";
   item.attempts += 1;
   item.lastAttemptAt =
@@ -97,6 +182,23 @@ export function markDelivered(id: string): void {
   );
 
   if (!item) return;
+
+  if (
+    item.state === "delivered"
+  ) {
+    return;
+  }
+
+  if (
+    item.state !== "sending" &&
+    item.state !== "queued"
+  ) {
+    return;
+  }
+
+  if (item.state !== "sending") {
+    return;
+  }
 
   item.state = "delivered";
   item.lastError = undefined;
@@ -112,6 +214,10 @@ export function markFailed(
 
   if (!item) return;
 
+  if (item.state !== "sending") {
+    return;
+  }
+
   item.state = "failed";
   item.lastError = error;
 }
@@ -122,6 +228,29 @@ export function requeue(id: string): void {
   );
 
   if (!item) return;
+
+  if (!canRetry(id)) {
+    return;
+  }
+
+  item.state = "queued";
+  item.lastError = undefined;
+}
+
+export function retryFailed(
+  id: string,
+): void {
+  const item = queue.find(
+    candidate => candidate.id === id,
+  );
+
+  if (!item || item.state !== "failed") {
+    return;
+  }
+
+  if (!canRetry(id)) {
+    return;
+  }
 
   item.state = "queued";
   item.lastError = undefined;
@@ -141,4 +270,8 @@ export function removeDelivered(): void {
 
 export function clearQueue(): void {
   queue.splice(0, queue.length);
+}
+
+export function resetQueue(): void {
+  clearQueue();
 }
