@@ -1,0 +1,87 @@
+export interface AttachmentCandidate {
+  uri: string;
+  type?: string;
+  mimeType?: string;
+  fileName?: string;
+  fileSize?: number;
+}
+
+export interface AttachmentValidation {
+  valid: boolean;
+  reason?: string;
+}
+
+const MAX_ATTACHMENT_BYTES =
+  100 * 1024 * 1024;
+
+const allowedMimePrefixes = [
+  "image/",
+  "video/",
+  "audio/",
+];
+
+const allowedMimeTypes = new Set([
+  "application/pdf",
+  "text/plain",
+  "application/zip",
+  "application/json",
+  "application/octet-stream",
+]);
+
+export function validateAttachment(
+  candidate: AttachmentCandidate,
+): AttachmentValidation {
+  if (!candidate.uri) {
+    return {
+      valid: false,
+      reason: "Attachment URI is missing.",
+    };
+  }
+
+  if (
+    typeof candidate.fileSize === "number" &&
+    candidate.fileSize > MAX_ATTACHMENT_BYTES
+  ) {
+    return {
+      valid: false,
+      reason:
+        "Attachment exceeds the 100 MB limit.",
+    };
+  }
+
+  if (candidate.mimeType) {
+    const allowed =
+      allowedMimePrefixes.some(prefix =>
+        candidate.mimeType!.startsWith(prefix),
+      ) ||
+      allowedMimeTypes.has(candidate.mimeType);
+
+    if (!allowed) {
+      return {
+        valid: false,
+        reason:
+          `Unsupported attachment type: ${candidate.mimeType}`,
+      };
+    }
+  }
+
+  return { valid: true };
+}
+
+export function attachmentTypeFromMime(
+  mimeType?: string,
+): "image" | "video" | "audio" | "file" {
+  if (mimeType?.startsWith("image/")) {
+    return "image";
+  }
+
+  if (mimeType?.startsWith("video/")) {
+    return "video";
+  }
+
+  if (mimeType?.startsWith("audio/")) {
+    return "audio";
+  }
+
+  return "file";
+}

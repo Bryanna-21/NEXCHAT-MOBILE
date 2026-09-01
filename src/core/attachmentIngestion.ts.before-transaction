@@ -1,0 +1,131 @@
+import {
+  storeAttachment,
+  StoredAttachment,
+} from "./attachmentStore";
+
+import {
+  validateAttachment,
+  attachmentTypeFromMime,
+} from "./attachmentValidation";
+
+import { Attachment } from "./store";
+
+export interface AttachmentInput {
+  uri: string;
+  name?: string;
+  mimeType?: string;
+  size?: number;
+  duration?: number;
+  width?: number;
+  height?: number;
+  type?: Attachment["type"];
+}
+
+export interface AttachmentIngestionResult {
+  attachment: Attachment;
+  stored: boolean;
+}
+
+function makeAttachmentId(): string {
+  return (
+    `att-${Date.now()}-` +
+    Math.random()
+      .toString(36)
+      .slice(2, 10)
+  );
+}
+
+/**
+ * Convert picker output into the canonical NexChat
+ * attachment representation.
+ *
+ * This function is deliberately the only normal entry
+ * point for newly selected attachments.
+ */
+export async function ingestAttachment(
+  input: AttachmentInput,
+): Promise<AttachmentIngestionResult> {
+  if (!input.uri) {
+    throw new Error(
+      "Attachment URI is missing.",
+    );
+  }
+
+  const validation =
+    validateAttachment({
+      uri: input.uri,
+      mimeType: input.mimeType,
+      fileName: input.name,
+      fileSize: input.size,
+      type: input.type,
+    });
+
+  if (!validation.valid) {
+    throw new Error(
+      validation.reason ||
+        "Attachment validation failed.",
+    );
+  }
+
+  const id = makeAttachmentId();
+
+  const type =
+    input.type ||
+    attachmentTypeFromMime(
+      input.mimeType,
+    );
+
+  const candidate: StoredAttachment = {
+    id,
+    type,
+    uri: input.uri,
+    name: input.name,
+    mimeType: input.mimeType,
+    size: input.size,
+    createdAt:
+      new Date().toISOString(),
+  };
+
+  const stored =
+    await storeAttachment(candidate);
+
+  const attachment: Attachment = {
+    id: stored.id,
+    type: stored.type,
+    uri: stored.uri,
+    name: stored.name,
+    mimeType: stored.mimeType,
+    size: stored.size,
+    duration: input.duration,
+    width: input.width,
+    height: input.height,
+  };
+
+  return {
+    attachment,
+    stored: true,
+  };
+}
+
+/**
+ * Ingest multiple attachments sequentially.
+ *
+ * Sequential processing is intentional:
+ * - avoids excessive simultaneous filesystem writes
+ * - makes failures deterministic
+ * - keeps the pipeline easier to recover
+ */
+export async function ingestAttachments(
+  inputs: AttachmentInput[],
+): Promise<Attachment[]> {
+  const results: Attachment[] = [];
+
+  for (const input of inputs) {
+    const result =
+      await ingestAttachment(input);
+
+    results.push(result.attachment);
+  }
+
+  return results;
+}

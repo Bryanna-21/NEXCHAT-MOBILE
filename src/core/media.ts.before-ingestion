@@ -1,0 +1,143 @@
+import * as DocumentPicker from "expo-document-picker";
+import * as ImagePicker from "expo-image-picker";
+import { Attachment, AttachmentType } from "./store";
+
+function makeAttachmentId(): string {
+  return `att-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+function getAttachmentType(
+  mimeType?: string | null,
+  assetType?: string | null
+): AttachmentType {
+  if (mimeType?.startsWith("image/") || assetType === "image") {
+    return "image";
+  }
+
+  if (mimeType?.startsWith("video/") || assetType === "video") {
+    return "video";
+  }
+
+  if (mimeType?.startsWith("audio/") || assetType === "audio") {
+    return "audio";
+  }
+
+  return "file";
+}
+
+function normalizeImageVideoAsset(
+  asset: ImagePicker.ImagePickerAsset
+): Attachment {
+  return {
+    id: makeAttachmentId(),
+    uri: asset.uri,
+    type: getAttachmentType(asset.mimeType, asset.type),
+    name:
+      asset.fileName ||
+      `media-${Date.now()}`,
+    mimeType: asset.mimeType || undefined,
+    size: asset.fileSize || undefined,
+    duration: asset.duration || undefined,
+    width: asset.width || undefined,
+    height: asset.height || undefined,
+  };
+}
+
+/**
+ * Pick photos/videos from the device gallery.
+ */
+export async function pickMedia(
+  multiple = true
+): Promise<Attachment[]> {
+  const permission =
+    await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+  if (!permission.granted) {
+    throw new Error(
+      "Media permission is required to choose photos and videos."
+    );
+  }
+
+  const result =
+    await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images", "videos"],
+      allowsMultipleSelection: multiple,
+      quality: 1,
+      selectionLimit: multiple ? 10 : 1,
+    });
+
+  if (result.canceled) {
+    return [];
+  }
+
+  return result.assets.map(normalizeImageVideoAsset);
+}
+
+/**
+ * Pick arbitrary files from the device.
+ *
+ * This handles PDFs, documents, archives and other
+ * file types supported by the native document picker.
+ */
+export async function pickFiles(
+  multiple = true
+): Promise<Attachment[]> {
+  const result =
+    await DocumentPicker.getDocumentAsync({
+      type: "*/*",
+      multiple,
+      copyToCacheDirectory: true,
+    });
+
+  if (result.canceled) {
+    return [];
+  }
+
+  return result.assets.map((asset) => ({
+    id: makeAttachmentId(),
+    uri: asset.uri,
+    type: getAttachmentType(asset.mimeType),
+    name:
+      asset.name ||
+      `file-${Date.now()}`,
+    mimeType:
+      asset.mimeType || undefined,
+    size:
+      asset.size || undefined,
+  }));
+}
+
+/**
+ * Pick an image for the user's profile.
+ */
+export async function pickProfilePhoto(): Promise<
+  string | null
+> {
+  const permission =
+    await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+  if (!permission.granted) {
+    throw new Error(
+      "Media permission is required to choose a profile picture."
+    );
+  }
+
+  const result =
+    await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsMultipleSelection: false,
+      quality: 0.9,
+      selectionLimit: 1,
+    });
+
+  if (
+    result.canceled ||
+    !result.assets.length
+  ) {
+    return null;
+  }
+
+  return result.assets[0].uri;
+}

@@ -1,16 +1,5 @@
 import { useSyncExternalStore } from "react";
 import { readVault, saveVault, clearVault } from "./vault";
-import { deleteAttachmentIfUnreferenced } from "./attachmentLifecycle";
-import { attachmentExists } from "./attachmentStore";
-import {
-  createTransportEnvelope,
-} from "./transport/protocol";
-import { LocalTransport } from "./transport/local";
-import { TransportRouter } from "./transport/router";
-import {
-  transition,
-  messageStatusFromDelivery,
-} from "./transport/delivery";
 
 /* =========================================================
    NEXCHAT STORE
@@ -56,8 +45,6 @@ export type Message = {
   editedAt?: string;
 
   status: MessageStatus;
-
-  transportQueueId?: string;
 
   attachment?: Attachment;
 
@@ -132,10 +119,6 @@ export type AppSettings = {
     | "device"
     | "trusted-device"
     | "cloud";
-
-  lastBackupRunAt?: string;
-  lastBackupAttemptAt?: string;
-  lastBackupError?: string;
 
   readReceipts: boolean;
   lastSeen: boolean;
@@ -217,20 +200,6 @@ let state: {
 
 const listeners = new Set<() => void>();
 
-function getTransportRouter(): TransportRouter {
-  return new TransportRouter({
-    transports: [
-      new LocalTransport(),
-    ],
-    settings: {
-      preferredRoute:
-        state.settings.p2pRoute,
-      allowDirect:
-        state.settings.allowDirectP2P,
-    },
-  });
-}
-
 let writeChain: Promise<void> = Promise.resolve();
 
 function emit(): void {
@@ -245,26 +214,6 @@ function findConversation(
   return state.conversations.find(
     (conversation) =>
       conversation.peerId === peerId
-  );
-}
-
-/**
- * Read the current persisted settings directly, without going
- * through the React hook.
- *
- * Used for startup logic (like checking whether a scheduled
- * backup is due) that runs before/outside a component render
- * and cannot wait for a hook snapshot to catch up.
- */
-export function getPersistedSettingsSnapshot(): AppSettings {
-  return state.settings;
-}
-
-function encodeTransportPayload(
-  message: Message,
-): Uint8Array {
-  return new TextEncoder().encode(
-    JSON.stringify(message),
   );
 }
 
@@ -466,30 +415,6 @@ export function useNexChatStore() {
         );
       }
 
-      /*
-       * Attachment integrity boundary.
-       *
-       * Every message attachment must already exist in the
-       * durable attachment store before the message reference
-       * is persisted.
-       *
-       * Forwarded messages intentionally reuse the same
-       * attachment ID, so this verification also protects
-       * forwarded references without duplicating the file.
-       */
-      if (attachment?.id) {
-        const exists =
-          await attachmentExists(
-            attachment.id,
-          );
-
-        if (!exists) {
-          throw new Error(
-            "Attachment is no longer available.",
-          );
-        }
-      }
-
       let conversation =
         findConversation(peerId);
 
@@ -516,88 +441,13 @@ export function useNexChatStore() {
           options
         );
 
-      let deliveryState =
-        transition(
-          "created",
-          "sending",
-        );
-
-      const sendingMessage: Message = {
-        ...message,
-        status: "sending",
-      };
-
-      const envelope =
-        createTransportEnvelope(
-          "me",
-          peerId,
-          encodeTransportPayload(
-            sendingMessage,
-          ),
-          sendingMessage.id,
-        );
-
-      envelope.ttl = 7 * 24 * 60 * 60 * 1000;
-
-      let transportResult;
-
-      try {
-        transportResult =
-          await getTransportRouter().send(
-            envelope,
-          );
-      } catch (error) {
-        transition(
-          deliveryState,
-          "failed",
-        );
-
-        throw error;
-      }
-
-      if (transportResult.delivered) {
-        deliveryState =
-          transition(
-            deliveryState,
-            "sent",
-          );
-
-        deliveryState =
-          transition(
-            deliveryState,
-            "delivered",
-          );
-      } else if (transportResult.queued) {
-        deliveryState =
-          transition(
-            deliveryState,
-            "queued",
-          );
-      } else {
-        deliveryState =
-          transition(
-            deliveryState,
-            "failed",
-          );
-      }
-
-      const finalMessage: Message = {
-        ...sendingMessage,
-        status:
-          messageStatusFromDelivery(
-            deliveryState,
-          ),
-        transportQueueId:
-          transportResult.queueId,
-      };
-
       const updatedConversation: Conversation =
         {
           ...conversation,
 
           messages: [
             ...conversation.messages,
-            finalMessage,
+            message,
           ],
         };
 
@@ -664,86 +514,42 @@ export function useNexChatStore() {
       id: string,
       forEveryone = false
     ): Promise<void> => {
-      const currentConversations =
-        state.conversations;
-
-      const targetMessage =
-        currentConversations
-          .flatMap(
-            conversation =>
-              conversation.messages
-          )
-          .find(
-            message =>
-              message.id === id
-          );
-
-      const removedAttachmentId =
-        targetMessage?.attachment?.id;
-
-      const nextConversations =
-        currentConversations.map(
-          conversation => ({
-            ...conversation,
-
-            messages:
-              conversation.messages.map(
-                message =>
-                  message.id === id
-                    ? {
-                        ...message,
-
-                        text:
-                          forEveryone
-                            ? "This message was deleted"
-                            : message.text,
-
-                        attachment:
-                          undefined,
-
-                        ...(forEveryone
-                          ? {
-                              deletedForEveryone:
-                                true,
-                            }
-                          : {
-                              deletedForMe:
-                                true,
-                            }),
-                      }
-                    : message
-              ),
-          })
-        );
-
       await queuePersist({
         conversations:
-          nextConversations,
-      });
+          state.conversations.map(
+            (conversation) => ({
+              ...conversation,
 
-      /*
-       * The new state has been persisted successfully.
-       * Only now is the removed attachment eligible for
-       * physical deletion.
-       *
-       * Reference-aware cleanup protects forwarded messages
-       * and any other message sharing the same attachment ID.
-       */
-      if (removedAttachmentId) {
-        try {
-          await deleteAttachmentIfUnreferenced(
-            removedAttachmentId,
-            nextConversations
-          );
-        } catch {
-          /*
-           * Physical cleanup is best-effort.
-           *
-           * The message deletion itself has already succeeded.
-           * A later reconciliation pass can remove the orphan.
-           */
-        }
-      }
+              messages:
+                conversation.messages.map(
+                  (message) =>
+                    message.id === id
+                      ? {
+                          ...message,
+
+                          text:
+                            forEveryone
+                              ? "This message was deleted"
+                              : message.text,
+
+                          attachment:
+                            undefined,
+
+                          ...(forEveryone
+                            ? {
+                                deletedForEveryone:
+                                  true,
+                              }
+                            : {
+                                deletedForMe:
+                                  true,
+                              }),
+                        }
+                      : message
+                ),
+            })
+          ),
+      });
     },
 
     markViewOnce: async (
@@ -857,24 +663,6 @@ export function useNexChatStore() {
         throw new Error(
           "This contact is blocked."
         );
-      }
-
-      /*
-       * Forwarding reuses the original attachment ID.
-       * Verify the physical attachment still exists before
-       * persisting another message reference to it.
-       */
-      if (sourceMessage.attachment?.id) {
-        const exists =
-          await attachmentExists(
-            sourceMessage.attachment.id,
-          );
-
-        if (!exists) {
-          throw new Error(
-            "The attachment being forwarded is no longer available.",
-          );
-        }
       }
 
       let conversation =
@@ -992,80 +780,6 @@ export function useNexChatStore() {
                 : conversation
           ),
       });
-    },
-
-    clearConversation: async (
-      peerId: string
-    ): Promise<void> => {
-      const conversation =
-        findConversation(peerId);
-
-      if (!conversation) {
-        return;
-      }
-
-      const attachmentIds =
-        new Set<string>();
-
-      for (
-        const message
-        of conversation.messages
-      ) {
-        const attachment =
-          message.attachment;
-
-        if (attachment?.id) {
-          attachmentIds.add(
-            attachment.id
-          );
-        }
-      }
-
-      const nextConversations =
-        state.conversations.map(
-          current =>
-            current.peerId === peerId
-              ? {
-                  ...current,
-                  messages: [],
-                }
-              : current
-        );
-
-      /*
-       * Persist the destructive state change first.
-       *
-       * If persistence fails, no physical attachment is
-       * removed and the previous conversation remains intact.
-       */
-      await queuePersist({
-        conversations:
-          nextConversations,
-      });
-
-      /*
-       * Physical deletion happens only after the new state
-       * has been persisted.
-       *
-       * The reference-aware lifecycle layer protects files
-       * that are still used by another message.
-       */
-      for (const attachmentId of attachmentIds) {
-        try {
-          await deleteAttachmentIfUnreferenced(
-            attachmentId,
-            nextConversations
-          );
-        } catch {
-          /*
-           * Best-effort physical cleanup.
-           *
-           * The chat itself has already been cleared.
-           * A future reconciliation pass can remove any
-           * attachment whose cleanup failed here.
-           */
-        }
-      }
     },
 
     updateSettings: async (
