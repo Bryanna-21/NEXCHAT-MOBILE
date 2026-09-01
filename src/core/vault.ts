@@ -230,3 +230,76 @@ export function isValidVaultEnvelopeShape(raw: string): boolean {
     return false;
   }
 }
+
+/**
+ * Restore the vault from a raw encrypted envelope (as produced
+ * by a backup).
+ *
+ * This is the only real integrity check that matters: the
+ * envelope must decrypt successfully with THIS device's current
+ * vault key. A backup that does not decrypt is either corrupted,
+ * tampered with, or belongs to a different device/key — any of
+ * which must be rejected rather than silently overwriting live
+ * data.
+ *
+ * On any failure, the previous vault data (if any) is restored
+ * exactly as it was. The live vault is only left in the new
+ * state after a full round-trip verification succeeds.
+ */
+export async function restoreVaultFromEncryptedEnvelope(
+  raw: string,
+): Promise<void> {
+  if (!isValidVaultEnvelopeShape(raw)) {
+    throw new Error(
+      "The backup envelope is not well-formed.",
+    );
+  }
+
+  const envelope = JSON.parse(raw) as VaultEnvelope;
+  const key = await getKey();
+
+  const nonce = base64ToBytes(envelope.nonce);
+  const ciphertext = base64ToBytes(envelope.ciphertext);
+
+  const plaintext = nacl.secretbox.open(
+    ciphertext,
+    nonce,
+    key,
+  );
+
+  if (!plaintext) {
+    throw new Error(
+      "This backup cannot be decrypted with this device's current vault key. It may belong to a different device or installation.",
+    );
+  }
+
+  try {
+    JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    throw new Error(
+      "The backup's decrypted contents are not valid NexChat data.",
+    );
+  }
+
+  const previous = await AsyncStorage.getItem(DATA_KEY);
+
+  try {
+    await AsyncStorage.setItem(DATA_KEY, raw);
+
+    const verified = await verifyVault();
+
+    if (!verified) {
+      throw new Error(
+        "Restored vault failed post-write verification.",
+      );
+    }
+  } catch (error) {
+    if (previous !== null) {
+      await AsyncStorage.setItem(DATA_KEY, previous);
+    } else {
+      await AsyncStorage.removeItem(DATA_KEY);
+    }
+
+    throw error;
+  }
+}
