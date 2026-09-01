@@ -4,6 +4,7 @@ import {
   getEncryptedVaultEnvelope,
   isValidVaultEnvelopeShape,
   hasVaultData,
+  restoreVaultFromEncryptedEnvelope,
 } from "./vault";
 
 const BACKUP_KEY = "nexchat.backup.device.v1";
@@ -156,4 +157,50 @@ export async function verifyBackupIntegrity(): Promise<boolean> {
 
 export async function clearDeviceBackup(): Promise<void> {
   await AsyncStorage.removeItem(BACKUP_KEY);
+}
+
+/**
+ * Restore the live vault from the stored device backup.
+ *
+ * This inspects and validates the backup envelope, then hands
+ * the still-encrypted contents to the vault module for the
+ * actual decrypt-and-verify restore. It never decrypts
+ * anything itself.
+ *
+ * Existing vault data is only replaced after the vault module
+ * confirms the restored data is valid and readable. On any
+ * failure, the previous vault state is preserved automatically
+ * by restoreVaultFromEncryptedEnvelope's rollback.
+ */
+export async function restoreFromBackup(): Promise<void> {
+  const raw = await AsyncStorage.getItem(BACKUP_KEY);
+
+  if (!raw) {
+    throw new Error(
+      "No backup is available to restore.",
+    );
+  }
+
+  let envelope: BackupEnvelope;
+
+  try {
+    envelope = JSON.parse(raw) as BackupEnvelope;
+  } catch {
+    throw new Error(
+      "The stored backup is corrupted and cannot be parsed.",
+    );
+  }
+
+  if (
+    envelope.version !== 2 ||
+    typeof envelope.encryptedVaultEnvelope !== "string"
+  ) {
+    throw new Error(
+      "This backup is not in a supported format.",
+    );
+  }
+
+  await restoreVaultFromEncryptedEnvelope(
+    envelope.encryptedVaultEnvelope,
+  );
 }
