@@ -15,6 +15,7 @@ import {
 } from "expo-audio";
 
 import { Attachment } from "../../core/store";
+import { ingestAttachment } from "../../core/attachmentIngestion";
 
 type Props = {
   theme: any;
@@ -107,18 +108,25 @@ export default function VoiceRecorder({
       const duration =
         Math.round(state.durationMillis / 1000) || 1;
 
-      const attachment: Attachment = {
-        id: `audio-${Date.now()}-${Math.random()
-          .toString(36)
-          .slice(2, 8)}`,
-        uri: recorder.uri,
-        type: "audio",
-        name: `voice-${Date.now()}.m4a`,
-        mimeType: "audio/mp4",
-        duration,
-      };
+      /*
+       * Voice recordings use the same durable attachment
+       * ingestion boundary as photos and files.
+       *
+       * The recorder URI is treated as temporary input.
+       * The ingestion layer validates it, copies it into
+       * NexChat's durable attachment store, and returns
+       * the canonical attachment reference.
+       */
+      const result =
+        await ingestAttachment({
+          uri: recorder.uri,
+          type: "audio",
+          name: `voice-${Date.now()}.m4a`,
+          mimeType: "audio/mp4",
+          duration,
+        });
 
-      onRecorded(attachment);
+      onRecorded(result.attachment);
     } catch (error) {
       console.error("Stopping voice recording failed:", error);
 
