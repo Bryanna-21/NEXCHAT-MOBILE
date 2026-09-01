@@ -40,6 +40,26 @@ async function getKey(): Promise<Uint8Array> {
   let encoded = await SecureStore.getItemAsync(KEY_NAME);
 
   if (!encoded) {
+    /*
+     * Fail-closed key lifecycle.
+     *
+     * If encrypted vault data already exists, the key must
+     * already exist too. A missing key alongside existing
+     * vault data means the key store was cleared, corrupted,
+     * or this is a different device/install — NOT a fresh
+     * install. Silently generating a replacement key here
+     * would make the existing vault permanently unreadable
+     * while pretending nothing is wrong.
+     */
+    const hasExistingVault =
+      (await AsyncStorage.getItem(DATA_KEY)) !== null;
+
+    if (hasExistingVault) {
+      throw new Error(
+        "NexChat vault key is missing but encrypted vault data exists. Refusing to generate a replacement key.",
+      );
+    }
+
     const key = nacl.randomBytes(nacl.secretbox.keyLength);
     encoded = bytesToBase64(key);
 
@@ -164,4 +184,49 @@ export async function verifyVault(): Promise<boolean> {
 export async function clearVault(): Promise<void> {
   await AsyncStorage.removeItem(DATA_KEY);
   await SecureStore.deleteItemAsync(KEY_NAME);
+}
+
+/**
+ * Return the raw, still-encrypted vault envelope exactly as
+ * stored on disk — WITHOUT decrypting it.
+ *
+ * This exists specifically so callers like the backup module
+ * can obtain an encrypted representation of the vault without
+ * ever holding plaintext. The vault module owns encryption;
+ * no other module should decrypt data for backup purposes.
+ *
+ * Returns null if no vault data exists yet.
+ */
+export async function getEncryptedVaultEnvelope(): Promise<string | null> {
+  return AsyncStorage.getItem(DATA_KEY);
+}
+
+/**
+ * Validate that a string is a structurally well-formed vault
+ * envelope WITHOUT decrypting it and WITHOUT touching the live
+ * vault or key. Used for read-only backup verification.
+ */
+export function isValidVaultEnvelopeShape(raw: string): boolean {
+  try {
+    const envelope = JSON.parse(raw) as VaultEnvelope;
+
+    if (
+      envelope.version !== 2 ||
+      envelope.algorithm !== "XSalsa20-Poly1305" ||
+      typeof envelope.nonce !== "string" ||
+      typeof envelope.ciphertext !== "string"
+    ) {
+      return false;
+    }
+
+    const nonce = base64ToBytes(envelope.nonce);
+    const ciphertext = base64ToBytes(envelope.ciphertext);
+
+    return (
+      nonce.length === nacl.secretbox.nonceLength &&
+      ciphertext.length > nacl.secretbox.overheadLength
+    );
+  } catch {
+    return false;
+  }
 }
