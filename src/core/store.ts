@@ -329,10 +329,21 @@ function makeMessage(
   };
 }
 
+/**
+ * Most recent persistence failure, if any. Exposed so the UI
+ * layer can show a banner/warning without needing every single
+ * call site to individually catch and display errors.
+ */
+let lastPersistError: Error | null = null;
+
+export function getLastPersistError(): Error | null {
+  return lastPersistError;
+}
+
 function queuePersist(
   next: Partial<PersistedState>
 ): Promise<void> {
-  writeChain = writeChain.then(
+  const task = writeChain.then(
     async () => {
       const current: PersistedState = {
         conversations:
@@ -354,13 +365,56 @@ function queuePersist(
           JSON.stringify(merged).length,
       };
 
-      await saveVault(merged);
-
+      /*
+       * Reflect the change in the UI immediately.
+       *
+       * This app is local-first: the in-memory state is the
+       * source of truth for what the user sees right now.
+       * Waiting on the encrypted disk write before updating the
+       * UI would make every toggle/message feel unresponsive,
+       * and — worse — a single persistence failure would make
+       * the UI look permanently frozen even though the action
+       * genuinely happened in memory.
+       */
       emit();
+
+      try {
+        await saveVault(merged);
+        lastPersistError = null;
+      } catch (error) {
+        lastPersistError =
+          error instanceof Error
+            ? error
+            : new Error(
+                "Failed to save NexChat data.",
+              );
+
+        throw lastPersistError;
+      }
     }
   );
 
-  return writeChain;
+  /*
+   * Critical: the write chain itself must never stay rejected.
+   *
+   * writeChain exists only to SERIALIZE writes (so two saves
+   * never race each other) — it must not become a permanent
+   * failure gate. Previously, one failed saveVault() call left
+   * writeChain rejected forever; every subsequent queuePersist
+   * silently chained onto that rejection and never ran again,
+   * which made the entire app (messages, settings, theme,
+   * toggles — everything routes through here) appear frozen
+   * after a single transient storage error, with no way to
+   * recover short of restarting the app.
+   *
+   * The caller-facing `task` promise still rejects on failure,
+   * so individual callers (sendMessage, updateSettings, etc.)
+   * can still detect and report a specific failure if they
+   * choose to.
+   */
+  writeChain = task.catch(() => {});
+
+  return task;
 }
 
 export function useNexChatStore() {
