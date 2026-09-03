@@ -676,6 +676,58 @@ export function useNexChatStore() {
       await queuePersist({
         conversations,
       });
+
+      /*
+       * Simulate the recipient reading the message after a
+       * short delay, gated by the Read Receipts setting.
+       *
+       * This is a local-only demo transport with no real
+       * recipient device, so there is no genuine read
+       * confirmation to wait for. This delay exists so the
+       * tick UI (sent -> delivered -> read) is meaningfully
+       * testable rather than permanently stuck.
+       *
+       * Respecting Read Receipts here matches real messaging
+       * apps: turning Read Receipts off means you also stop
+       * seeing other people's read status, so the ladder caps
+       * at the double "delivered" tick and never turns blue.
+       *
+       * The guard (status === "delivered") avoids clobbering a
+       * message that failed, was deleted, or was edited in the
+       * meantime.
+       */
+      if (state.settings.readReceipts) {
+        const readMessageId = finalMessage.id;
+        const readPeerId = peerId;
+
+        setTimeout(() => {
+          queuePersist({
+            conversations:
+              state.conversations.map(
+                (c) =>
+                  c.peerId === readPeerId
+                    ? {
+                        ...c,
+                        messages:
+                          c.messages.map(
+                            (mm) =>
+                              mm.id ===
+                                readMessageId &&
+                              mm.status ===
+                                "delivered"
+                                ? {
+                                    ...mm,
+                                    status:
+                                      "read",
+                                  }
+                                : mm
+                          ),
+                      }
+                    : c
+              ),
+          });
+        }, 2500);
+      }
     },
 
     editMessage: async (

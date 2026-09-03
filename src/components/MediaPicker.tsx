@@ -80,10 +80,6 @@ export function MediaPicker({
           onPress: takePhoto,
         },
         {
-          text: "Camera",
-          onPress: takePhoto,
-        },
-        {
           text: "Photos / Videos",
           onPress: chooseMedia,
         },

@@ -11,7 +11,8 @@ import {useNexChatStore,Attachment,Conversation,NexContact,Message,MessageStatus
 import {shouldRunBackup,runBackup} from "./src/core/backupScheduler";
 import {MediaPicker} from "./src/components/MediaPicker";
 import {QRScanner} from "./src/components/QRScanner";
-import {pickProfilePhoto} from "./src/core/media";
+import {pickProfilePhoto,pickMedia,capturePhoto} from "./src/core/media";
+import VoiceRecorder from "./src/components/audio/VoiceRecorder";
 import {createContactQR} from "./src/core/qr";
 import QRCode from "react-native-qrcode-svg";
 import {MediaPreview} from "./src/components/MediaPreview";
@@ -534,7 +535,271 @@ function MessageBubble({
   );
 }
 
-function Chat({peerId,theme,onBack,onInfo,onCall,onVideo}:{peerId:string;theme:any;onBack:()=>void;onInfo:()=>void;onCall:()=>void;onVideo:()=>void}){const st=useNexChatStore();const c=st.conversations.find(x=>x.peerId===peerId);const contact=st.contacts.find(x=>x.id===peerId);const [text,setText]=useState("");const [media,setMedia]=useState<Attachment[]>([]);const [edit,setEdit]=useState<string|null>(null);const [editText,setEditText]=useState("");const send=async()=>{if(!text.trim()&&!media.length)return;if(media.length===0){await st.sendMessage(peerId,text.trim());}else{for(const item of media) await st.sendMessage(peerId,text.trim(),item);}setText("");setMedia([])};return <View style={s.flex}><Header title={contact?.displayName||peerId} subtitle={contact?.online?"online":"offline"} onBack={onBack} onInfo={onInfo} onCall={onCall} onVideo={onVideo} theme={theme}/><View style={[s.encryptedBar,{backgroundColor:theme.card,borderBottomColor:theme.line}]}><Text style={{fontSize:12,color:theme.muted}}>🔐 End-to-end encrypted • Local queue ready</Text></View><FlatList inverted data={[...(c?.messages||[])].filter(m=>!m.expiresAt||new Date(m.expiresAt).getTime()>Date.now()).reverse()} keyExtractor={m=>m.id} contentContainerStyle={{padding:12,gap:6}} renderItem={({item})=><MessageBubble m={item} theme={theme} onEdit={()=>{setEdit(item.id);setEditText(item.text)}} onDelete={()=>Alert.alert("Delete message","Delete for everyone or only for you?",[{text:"For everyone",onPress:()=>st.deleteMessage(item.id,true)},{text:"For me",onPress:()=>st.deleteMessage(item.id,false)},{text:"Cancel",style:"cancel"}])} onViewOnce={()=>st.markViewOnce(item.id)}/>} ListEmptyComponent={<View style={s.empty}><Text style={{color:theme.muted}}>Start the conversation.</Text></View>}/><View style={[s.composer,{backgroundColor:theme.card,borderTopColor:theme.line}]}>{media.length>0&&<ScrollView horizontal>{media.map((m,i)=><MediaPreview key={m.id} media={m} onRemove={()=>setMedia(media.filter((_,x)=>x!==i))}/>)}</ScrollView>}<View style={{flexDirection:"row",alignItems:"flex-end",gap:8}}><TouchableOpacity onPress={()=>Alert.alert("Attachments","Choose what to send",[{text:"Photos / Videos",onPress:async()=>setMedia(await import("./src/core/media").then(x=>x.pickMedia(true)))},{text:"Cancel",style:"cancel"}])}><Text style={{fontSize:25}}>＋</Text></TouchableOpacity><TextInput value={text} onChangeText={setText} multiline placeholder="Message" placeholderTextColor={theme.muted} style={[s.messageInput,{color:theme.ink,borderColor:theme.line,backgroundColor:theme.bg}]}/><TouchableOpacity onPress={send} style={[s.send,{backgroundColor:theme.brand}]}><Text style={{color:"white",fontWeight:"900"}}>➤</Text></TouchableOpacity></View></View>{edit&&<Modal transparent visible onRequestClose={()=>setEdit(null)}><View style={s.overlay}><View style={[s.dialog,{backgroundColor:theme.card}]}><Text style={[s.dialogTitle,{color:theme.ink}]}>Edit message</Text><TextInput value={editText} onChangeText={setEditText} style={[s.input,{color:theme.ink,borderColor:theme.line}]}/><Button label="Save edit" onPress={async()=>{await st.editMessage(edit,editText);setEdit(null)}}/><Button label="Cancel" secondary onPress={()=>setEdit(null)}/></View></View></Modal>}</View>}
+function Chat({
+  peerId,
+  theme,
+  onBack,
+  onInfo,
+  onCall,
+  onVideo,
+}: {
+  peerId: string;
+  theme: any;
+  onBack: () => void;
+  onInfo: () => void;
+  onCall: () => void;
+  onVideo: () => void;
+}) {
+  const st = useNexChatStore();
+  const c = st.conversations.find((x) => x.peerId === peerId);
+  const contact = st.contacts.find((x) => x.id === peerId);
+
+  const [text, setText] = useState("");
+  const [media, setMedia] = useState<Attachment[]>([]);
+  const [edit, setEdit] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
+  const [voiceVisible, setVoiceVisible] = useState(false);
+
+  /*
+   * A per-chat theme override was already being saved by the
+   * "Chat theme" picker in ContactInfo, but nothing ever read it
+   * back — every chat rendered with the global app theme
+   * regardless of what was chosen here. "system" means "follow
+   * the app's global theme", which is exactly the `theme` prop.
+   */
+  const effectiveTheme: any =
+    c?.theme && c.theme !== "system"
+      ? themes[c.theme as keyof typeof themes] || theme
+      : theme;
+
+  const send = async () => {
+    if (!text.trim() && !media.length) return;
+
+    if (media.length === 0) {
+      await st.sendMessage(peerId, text.trim());
+    } else {
+      for (const item of media) {
+        await st.sendMessage(peerId, text.trim(), item);
+      }
+    }
+
+    setText("");
+    setMedia([]);
+  };
+
+  const openAttachments = () => {
+    Alert.alert("Attachments", "Choose what to send", [
+      {
+        text: "Camera",
+        onPress: async () => {
+          try {
+            const photo = await capturePhoto();
+            if (photo) {
+              setMedia((prev) => [...prev, photo]);
+            }
+          } catch (e) {
+            Alert.alert(
+              "Camera unavailable",
+              e instanceof Error ? e.message : "Unable to use the camera."
+            );
+          }
+        },
+      },
+      {
+        text: "Photos / Videos",
+        onPress: async () => {
+          try {
+            const picked = await pickMedia(true);
+            if (picked.length) {
+              setMedia((prev) => [...prev, ...picked]);
+            }
+          } catch (e) {
+            Alert.alert(
+              "Media unavailable",
+              e instanceof Error ? e.message : "Unable to access media."
+            );
+          }
+        },
+      },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  };
+
+  return (
+    <View style={s.flex}>
+      <Header
+        title={contact?.displayName || peerId}
+        subtitle={contact?.online ? "online" : "offline"}
+        onBack={onBack}
+        onInfo={onInfo}
+        onCall={onCall}
+        onVideo={onVideo}
+        theme={effectiveTheme}
+      />
+
+      <View
+        style={[
+          s.encryptedBar,
+          {
+            backgroundColor: effectiveTheme.card,
+            borderBottomColor: effectiveTheme.line,
+          },
+        ]}
+      >
+        <Text style={{ fontSize: 12, color: effectiveTheme.muted }}>
+          🔐 End-to-end encrypted • Local queue ready
+        </Text>
+      </View>
+
+      <FlatList
+        inverted
+        data={[...(c?.messages || [])]
+          .filter(
+            (m) => !m.expiresAt || new Date(m.expiresAt).getTime() > Date.now()
+          )
+          .reverse()}
+        keyExtractor={(m) => m.id}
+        contentContainerStyle={{ padding: 12, gap: 6 }}
+        renderItem={({ item }) => (
+          <MessageBubble
+            m={item}
+            theme={effectiveTheme}
+            onEdit={() => {
+              setEdit(item.id);
+              setEditText(item.text);
+            }}
+            onDelete={() =>
+              Alert.alert(
+                "Delete message",
+                "Delete for everyone or only for you?",
+                [
+                  {
+                    text: "For everyone",
+                    onPress: () => st.deleteMessage(item.id, true),
+                  },
+                  {
+                    text: "For me",
+                    onPress: () => st.deleteMessage(item.id, false),
+                  },
+                  { text: "Cancel", style: "cancel" },
+                ]
+              )
+            }
+            onViewOnce={() => st.markViewOnce(item.id)}
+          />
+        )}
+        ListEmptyComponent={
+          <View style={s.empty}>
+            <Text style={{ color: effectiveTheme.muted }}>
+              Start the conversation.
+            </Text>
+          </View>
+        }
+      />
+
+      {voiceVisible ? (
+        <VoiceRecorder
+          theme={effectiveTheme}
+          onCancel={() => setVoiceVisible(false)}
+          onRecorded={async (attachment) => {
+            setVoiceVisible(false);
+            await st.sendMessage(peerId, "", attachment);
+          }}
+        />
+      ) : (
+        <View
+          style={[
+            s.composer,
+            {
+              backgroundColor: effectiveTheme.card,
+              borderTopColor: effectiveTheme.line,
+            },
+          ]}
+        >
+          {media.length > 0 && (
+            <ScrollView horizontal>
+              {media.map((m, i) => (
+                <MediaPreview
+                  key={m.id}
+                  media={m}
+                  onRemove={() =>
+                    setMedia(media.filter((_, x) => x !== i))
+                  }
+                />
+              ))}
+            </ScrollView>
+          )}
+
+          <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 8 }}>
+            <TouchableOpacity onPress={openAttachments}>
+              <Text style={{ fontSize: 25 }}>＋</Text>
+            </TouchableOpacity>
+
+            <TextInput
+              value={text}
+              onChangeText={setText}
+              multiline
+              placeholder="Message"
+              placeholderTextColor={effectiveTheme.muted}
+              style={[
+                s.messageInput,
+                {
+                  color: effectiveTheme.ink,
+                  borderColor: effectiveTheme.line,
+                  backgroundColor: effectiveTheme.bg,
+                },
+              ]}
+            />
+
+            {text.trim() || media.length ? (
+              <TouchableOpacity
+                onPress={send}
+                style={[s.send, { backgroundColor: effectiveTheme.brand }]}
+              >
+                <Text style={{ color: "white", fontWeight: "900" }}>➤</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity
+                onPress={() => setVoiceVisible(true)}
+                style={[s.send, { backgroundColor: effectiveTheme.brand }]}
+              >
+                <Text style={{ fontSize: 20 }}>🎙</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+      )}
+
+      {edit && (
+        <Modal transparent visible onRequestClose={() => setEdit(null)}>
+          <View style={s.overlay}>
+            <View style={[s.dialog, { backgroundColor: effectiveTheme.card }]}>
+              <Text style={[s.dialogTitle, { color: effectiveTheme.ink }]}>
+                Edit message
+              </Text>
+              <TextInput
+                value={editText}
+                onChangeText={setEditText}
+                style={[
+                  s.input,
+                  { color: effectiveTheme.ink, borderColor: effectiveTheme.line },
+                ]}
+              />
+              <Button
+                label="Save edit"
+                onPress={async () => {
+                  await st.editMessage(edit, editText);
+                  setEdit(null);
+                }}
+              />
+              <Button label="Cancel" secondary onPress={() => setEdit(null)} />
+            </View>
+          </View>
+        </Modal>
+      )}
+    </View>
+  );
+}
 
 function ContactInfo({peerId,theme,onBack,onCall,onVideo}:{peerId:string;theme:any;onBack:()=>void;onCall:()=>void;onVideo:()=>void}){const st=useNexChatStore();const c=st.contacts.find(x=>x.id===peerId);const conv=st.conversations.find(x=>x.peerId===peerId);const media=(conv?.messages||[]).map(m=>m.attachment).filter(Boolean) as Attachment[];const links=(conv?.messages||[]).filter(m=>/https?:\/\//.test(m.text));return <View style={s.flex}><Header title="Contact info" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={{paddingBottom:40}}><View style={s.profileHead}><View
   style={[
@@ -947,6 +1212,6 @@ function Calls({theme,onStartCall}:{theme:any;onStartCall:(peerId:string,video:b
 }
 function CallOverlay({contact,video,onClose,theme}:{contact:NexContact|undefined;video:boolean;onClose:()=>void;theme:any}){const online=!!contact?.online;return <Modal transparent visible onRequestClose={onClose}><View style={s.callOverlay}><View style={[s.callCard,{backgroundColor:theme.card}]}><View style={[s.bigAvatar,{backgroundColor:theme.brand}]}><Text style={{color:"white",fontSize:34,fontWeight:"900"}}>{(contact?.displayName||"N").slice(0,1)}</Text></View><Text style={[s.profileName,{color:theme.ink}]}>{contact?.displayName||"NexChat contact"}</Text><Text style={{color:theme.muted,fontSize:16}}>{video?"🎥 Video":"📞 Voice"}</Text><Text style={{color:theme.ink,fontWeight:"800",marginTop:18}}>{online?"Ringing…":"Calling…"}</Text><Text style={{color:theme.muted,textAlign:"center",marginTop:6}}>A real ring/connection requires the native WebRTC transport. This screen deliberately reports the true state instead of pretending a call connected.</Text><Button label="End call" danger onPress={onClose}/></View></View></Modal>}
 
-export default function App(){const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);const st=useNexChatStore();const [call,setCall]=useState<{peerId:string;video:boolean}|null>(null);const [startupError,setStartupError]=useState<string|null>(null);const [startupRetry,setStartupRetry]=useState(0);useEffect(()=>{(async()=>{try{await initIdentity();await initVault();await st.hydrate();setIdentity(await getIdentity());const bs=getPersistedSettingsSnapshot();const cfg={enabled:bs.backupEnabled,schedule:bs.backupSchedule,destination:bs.backupDestination};if(shouldRunBackup(cfg,bs.lastBackupRunAt??null)){const result=await runBackup(cfg);await st.updateSettings(result.success?{lastBackupRunAt:result.startedAt,lastBackupAttemptAt:result.startedAt,lastBackupError:undefined}:{lastBackupAttemptAt:result.startedAt,lastBackupError:result.error});}setStartupError(null)}catch(e){setStartupError(e instanceof Error?e.message:"NexChat failed to start for an unknown reason.")}})();},[startupRetry]);const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;if(startupError){return <SafeAreaView style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/><View style={{flex:1,alignItems:"center",justifyContent:"center",padding:28,gap:14}}><Text style={{fontSize:44}}>⚠️</Text><Text style={{fontSize:19,fontWeight:"900",color:theme.ink,textAlign:"center"}}>NexChat couldn't start</Text><Text style={{color:theme.muted,textAlign:"center"}}>{startupError}</Text><View style={{width:"100%",gap:10,marginTop:10}}><Button label="Try again" onPress={()=>setStartupRetry(k=>k+1)}/><Button label="Reset local vault (this device only)" danger onPress={()=>Alert.alert("Reset local vault?","This permanently deletes all chats, contacts and settings stored on this device. This cannot be undone, and only helps if the vault itself is what's broken.",[{text:"Reset",style:"destructive",onPress:async()=>{try{await clearVault();setStartupRetry(k=>k+1)}catch(e){Alert.alert("Reset failed",e instanceof Error?e.message:"Unable to reset local vault.")}}},{text:"Cancel",style:"cancel"}])}/></View></View></SafeAreaView>}const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>setCall({peerId:screen.peerId,video:false})} onVideo={()=>setCall({peerId:screen.peerId,video:true})}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>setCall({peerId:screen.peerId,video:false})} onVideo={()=>setCall({peerId:screen.peerId,video:true})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})}/>;switch(tab){case"Chats":return <ChatList theme={theme} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme} onStartCall={(peerId,video)=>setCall({peerId,video})}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <StoriesScreen theme={theme} identity={identity}/>;default:return <FeedScreen theme={theme} identity={identity}/>}},[screen,tab,theme,st]);return <SafeAreaView style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/>{body}{screen.name==="home"&&<View style={[s.nav,{backgroundColor:theme.card,borderTopColor:theme.line}]}>{(["Chats","Stories","Feed","Calls","Settings"] as Tab[]).map(x=><TouchableOpacity key={x} onPress={()=>x==="Settings"?setScreen({name:"settings"}):setTab(x)} style={s.navItem}><Text style={{fontSize:18}}>{x==="Chats"?"💬":x==="Stories"?"◉":x==="Feed"?"▦":x==="Calls"?"📞":"⚙"}</Text><Text style={{fontSize:11,color:tab===x?theme.brand:theme.muted,fontWeight:"800"}}>{x}</Text></TouchableOpacity>)}</View>}{call&&<CallOverlay contact={contact} video={call.video} onClose={()=>setCall(null)} theme={theme}/>}</SafeAreaView>}
+export default function App(){const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);const st=useNexChatStore();const [call,setCall]=useState<{peerId:string;video:boolean}|null>(null);const [startupError,setStartupError]=useState<string|null>(null);const [startupRetry,setStartupRetry]=useState(0);useEffect(()=>{(async()=>{try{await initIdentity();await initVault();await st.hydrate();setIdentity(await getIdentity());const bs=getPersistedSettingsSnapshot();const cfg={enabled:bs.backupEnabled,schedule:bs.backupSchedule,destination:bs.backupDestination};if(shouldRunBackup(cfg,bs.lastBackupRunAt??null)){const result=await runBackup(cfg);await st.updateSettings(result.success?{lastBackupRunAt:result.startedAt,lastBackupAttemptAt:result.startedAt,lastBackupError:undefined}:{lastBackupAttemptAt:result.startedAt,lastBackupError:result.error});}setStartupError(null)}catch(e){setStartupError(e instanceof Error?e.message:"NexChat failed to start for an unknown reason.")}})();},[startupRetry]);const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>setCall({peerId:screen.peerId,video:false})} onVideo={()=>setCall({peerId:screen.peerId,video:true})}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>setCall({peerId:screen.peerId,video:false})} onVideo={()=>setCall({peerId:screen.peerId,video:true})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})}/>;switch(tab){case"Chats":return <ChatList theme={theme} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme} onStartCall={(peerId,video)=>setCall({peerId,video})}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <StoriesScreen theme={theme} identity={identity}/>;default:return <FeedScreen theme={theme} identity={identity}/>}},[screen,tab,theme,st]);if(startupError){return <SafeAreaView style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/><View style={{flex:1,alignItems:"center",justifyContent:"center",padding:28,gap:14}}><Text style={{fontSize:44}}>⚠️</Text><Text style={{fontSize:19,fontWeight:"900",color:theme.ink,textAlign:"center"}}>NexChat couldn't start</Text><Text style={{color:theme.muted,textAlign:"center"}}>{startupError}</Text><View style={{width:"100%",gap:10,marginTop:10}}><Button label="Try again" onPress={()=>setStartupRetry(k=>k+1)}/><Button label="Reset local vault (this device only)" danger onPress={()=>Alert.alert("Reset local vault?","This permanently deletes all chats, contacts and settings stored on this device. This cannot be undone, and only helps if the vault itself is what's broken.",[{text:"Reset",style:"destructive",onPress:async()=>{try{await clearVault();setStartupRetry(k=>k+1)}catch(e){Alert.alert("Reset failed",e instanceof Error?e.message:"Unable to reset local vault.")}}},{text:"Cancel",style:"cancel"}])}/></View></View></SafeAreaView>}return <SafeAreaView style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/>{body}{screen.name==="home"&&<View style={[s.nav,{backgroundColor:theme.card,borderTopColor:theme.line}]}>{(["Chats","Stories","Feed","Calls","Settings"] as Tab[]).map(x=><TouchableOpacity key={x} onPress={()=>x==="Settings"?setScreen({name:"settings"}):setTab(x)} style={s.navItem}><Text style={{fontSize:18}}>{x==="Chats"?"💬":x==="Stories"?"◉":x==="Feed"?"▦":x==="Calls"?"📞":"⚙"}</Text><Text style={{fontSize:11,color:tab===x?theme.brand:theme.muted,fontWeight:"800"}}>{x}</Text></TouchableOpacity>)}</View>}{call&&<CallOverlay contact={contact} video={call.video} onClose={()=>setCall(null)} theme={theme}/>}</SafeAreaView>}
 
 const s=StyleSheet.create({safe:{flex:1},flex:{flex:1},header:{minHeight:68,paddingHorizontal:8,flexDirection:"row",alignItems:"center",borderBottomWidth:1},headBack:{width:42,alignItems:"center"},headTitle:{fontSize:18,fontWeight:"900"},headSub:{fontSize:11,marginTop:2},headAction:{width:42,alignItems:"center"},empty:{flex:1,alignItems:"center",justifyContent:"center",padding:30,gap:8},chatRow:{padding:12,borderWidth:1,borderRadius:16,marginBottom:8,flexDirection:"row",gap:12},avatar:{width:48,height:48,borderRadius:24,alignItems:"center",justifyContent:"center"},chatName:{fontWeight:"900",fontSize:16},fab:{position:"absolute",right:18,bottom:78,width:58,height:58,borderRadius:29,alignItems:"center",justifyContent:"center",elevation:4},nav:{height:66,borderTopWidth:1,flexDirection:"row",justifyContent:"space-around",paddingTop:8},navItem:{alignItems:"center",gap:2,minWidth:55},form:{padding:16,gap:12},label:{fontWeight:"900",marginTop:8},input:{borderWidth:1,borderRadius:14,padding:13,fontSize:15},chip:{borderWidth:1,borderRadius:14,padding:10,marginRight:8,minWidth:120},button:{backgroundColor:"#0C5A8D",paddingVertical:13,paddingHorizontal:16,borderRadius:14,alignItems:"center",justifyContent:"center"},secondary:{backgroundColor:"#E7EEF4"},danger:{backgroundColor:"#B42318"},buttonText:{color:"white",fontWeight:"900"},toggleLine:{flexDirection:"row",justifyContent:"space-between",alignItems:"center"},bubble:{maxWidth:"82%",padding:10,borderRadius:16,borderWidth:1,marginVertical:2},composer:{padding:8,borderTopWidth:1},messageInput:{flex:1,maxHeight:120,minHeight:44,borderWidth:1,borderRadius:22,paddingHorizontal:15,paddingVertical:10},send:{width:44,height:44,borderRadius:22,alignItems:"center",justifyContent:"center"},encryptedBar:{padding:7,alignItems:"center",borderBottomWidth:1},section:{marginBottom:12,borderWidth:1,borderRadius:16,overflow:"hidden"},row:{minHeight:58,paddingHorizontal:14,paddingVertical:9,flexDirection:"row",alignItems:"center",gap:12},rowIcon:{fontSize:19,width:25,textAlign:"center"},rowTitle:{fontWeight:"800",fontSize:15},rowSub:{fontSize:11,color:"#66788A",marginTop:2},chevron:{fontSize:25,color:"#78909C"},sectionTitle:{fontWeight:"900",fontSize:16,padding:14,paddingBottom:4},profileHead:{alignItems:"center",padding:24},bigAvatar:{width:96,height:96,borderRadius:48,alignItems:"center",justifyContent:"center"},profileName:{fontSize:23,fontWeight:"900",marginTop:10},idBox:{borderWidth:1,borderRadius:14,padding:15,fontWeight:"900",textAlign:"center"},bigStat:{fontSize:30,fontWeight:"900"},overlay:{flex:1,backgroundColor:"#0009",alignItems:"center",justifyContent:"center",padding:24},dialog:{width:"92%",padding:20,borderRadius:20,gap:12},dialogTitle:{fontSize:20,fontWeight:"900"},callOverlay:{flex:1,backgroundColor:"#000B",alignItems:"center",justifyContent:"center",padding:20},callCard:{width:"90%",borderRadius:26,padding:28,alignItems:"center",gap:10},profilePhoto:{width:120,height:120,borderRadius:60,borderWidth:2,alignItems:"center",justifyContent:"center",overflow:"hidden"},profilePhotoImage:{width:120,height:120,borderRadius:60},qrCard:{alignItems:"center",justifyContent:"center",padding:20,borderWidth:1,borderRadius:20},qrName:{fontSize:18,fontWeight:"900",marginTop:14}})
