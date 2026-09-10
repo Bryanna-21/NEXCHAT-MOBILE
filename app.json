@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "NexChat",
+    "slug": "nexchat",
+    "version": "0.3.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "scheme": "nexchat",
+    "android": {
+      "package": "com.nexchat.app",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "com.nexchat.app"
+    },
+    "plugins": [
+      "expo-audio",
+      "expo-asset",
+      "expo-secure-store"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "95b15e11-4dcd-4ed4-887a-e327d4b6be66"
+      }
+    }
+  }
+}

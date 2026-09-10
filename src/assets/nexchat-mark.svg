@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="64" fill="#E8F3FA"/>
+  <g fill="none" stroke="#0C5A8D" stroke-width="12" stroke-linejoin="round">
+    <path d="M128 34v76l-50 55-39-30 54-57"/>
+    <path d="M128 34v76l50 55 39-30-54-57"/>
+    <path d="M74 169l54-54 54 54"/>
+    <path d="M103 104V76a25 25 0 0 1 50 0v28"/>
+    <path d="M94 103h68v48H94z"/>
+  </g>
+  <path d="M99 92l58 58" stroke="#0C5A8D" stroke-width="12"/>
+  <text x="128" y="215" text-anchor="middle" font-family="Arial,sans-serif" font-size="42" font-weight="800" fill="#0C5A8D">N</text>
+</svg>
