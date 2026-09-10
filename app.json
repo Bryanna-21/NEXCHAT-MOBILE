@@ -1,6 +1,7 @@
 {
   "expo": {
     "name": "NexChat",
+    "icon": "./assets/icon.png",
     "slug": "nexchat",
     "version": "0.3.0",
     "orientation": "portrait",
