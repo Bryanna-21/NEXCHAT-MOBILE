@@ -3,7 +3,9 @@ import {
   Alert,
   FlatList,
   Image,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   ScrollView,
   Share,
   StyleSheet,
@@ -370,7 +372,7 @@ function ChannelDetail({
 
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
-      <View style={[s.flex, { backgroundColor: theme.bg }]}>
+      <KeyboardAvoidingView style={[s.flex, { backgroundColor: theme.bg }]} behavior={Platform.OS === "ios" ? "padding" : "height"}>
         <View
           style={[
             s.header,
@@ -598,7 +600,7 @@ function ChannelDetail({
             }}
           />
         )}
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -643,7 +645,7 @@ function CommentsModal({
 
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
-      <View style={[s.flex, { backgroundColor: theme.bg }]}>
+      <KeyboardAvoidingView style={[s.flex, { backgroundColor: theme.bg }]} behavior={Platform.OS === "ios" ? "padding" : "height"}>
         <View style={[s.header, { backgroundColor: theme.card, borderBottomColor: theme.line }]}>
           <TouchableOpacity onPress={onClose} style={{ paddingRight: 10 }}>
             <Text style={{ color: theme.ink, fontSize: 28 }}>‹</Text>
@@ -715,7 +717,7 @@ function CommentsModal({
             </TouchableOpacity>
           </View>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }

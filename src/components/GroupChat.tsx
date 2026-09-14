@@ -3,7 +3,9 @@ import {
   Alert,
   FlatList,
   Image,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -198,7 +200,10 @@ export function GroupChat({
   };
 
   return (
-    <View style={gs.flex}>
+    <KeyboardAvoidingView
+      style={gs.flex}
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
+    >
       <View style={[gs.header, { backgroundColor: theme.card, borderBottomColor: theme.line }]}>
         <TouchableOpacity onPress={onBack} style={{ paddingRight: 10 }}>
           <Text style={{ color: theme.ink, fontSize: 28 }}>‹</Text>
@@ -346,7 +351,7 @@ export function GroupChat({
       {call && (
         <GroupCallOverlay theme={theme} video={call.video} groupName={group.name} onEnd={endCall} />
       )}
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
