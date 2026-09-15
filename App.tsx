@@ -1302,7 +1302,276 @@ function CallOverlay({contact,video,onEnd,theme}:{contact:NexContact|undefined;v
   </Modal>;
 }
 
-function AppContent(){const insets=useSafeAreaInsets();const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);const st=useNexChatStore();const [call,setCall]=useState<{id:string;peerId:string;video:boolean;startedAt:string}|null>(null);const beginCall=(peerId:string,video:boolean)=>setCall({id:`call-${Date.now()}-${Math.random().toString(36).slice(2,10)}`,peerId,video,startedAt:new Date().toISOString()});const endCall=async(outcome:{status:CallHistoryEntry["status"];connectedAt?:string;durationSeconds?:number})=>{if(!call)return;const entry:CallHistoryEntry={id:call.id,peerId:call.peerId,type:call.video?"video":"voice",direction:"outgoing",status:outcome.status,startedAt:call.startedAt,connectedAt:outcome.connectedAt,endedAt:new Date().toISOString(),durationSeconds:outcome.durationSeconds};setCall(null);await st.logCall(entry);};const [startupError,setStartupError]=useState<string|null>(null);const [startupRetry,setStartupRetry]=useState(0);const [splashMinDone,setSplashMinDone]=useState(false);useEffect(()=>{(async()=>{try{await initIdentity();await initVault();await st.hydrate();setIdentity(await getIdentity());const bs=getPersistedSettingsSnapshot();const cfg={enabled:bs.backupEnabled,schedule:bs.backupSchedule,destination:bs.backupDestination};if(shouldRunBackup(cfg,bs.lastBackupRunAt??null)){const result=await runBackup(cfg);await st.updateSettings(result.success?{lastBackupRunAt:result.startedAt,lastBackupAttemptAt:result.startedAt,lastBackupError:undefined}:{lastBackupAttemptAt:result.startedAt,lastBackupError:result.error});}setStartupError(null)}catch(e){setStartupError(e instanceof Error?e.message:"NexChat failed to start for an unknown reason.")}})();},[startupRetry]);const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)} onDeleted={()=>setScreen({name:"home"})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})}/>;switch(tab){case"Chats":return <ChatListScreen theme={theme} identity={identity} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme} onStartCall={beginCall}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <StoriesScreen theme={theme} identity={identity}/>;default:return <FeedScreen theme={theme} identity={identity}/>}},[screen,tab,theme,st]);const appReady=identity!==null||startupError!==null;if(!splashMinDone||!appReady){return <BootSplash onMinimumDurationElapsed={()=>setSplashMinDone(true)}/>;}if(startupError){return <View style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/><View style={{flex:1,alignItems:"center",justifyContent:"center",padding:28,gap:14}}><Text style={{fontSize:44}}>⚠️</Text><Text style={{fontSize:19,fontWeight:"900",color:theme.ink,textAlign:"center"}}>NexChat couldn't start</Text><Text style={{color:theme.muted,textAlign:"center"}}>{startupError}</Text><View style={{width:"100%",gap:10,marginTop:10}}><Button label="Try again" onPress={()=>setStartupRetry(k=>k+1)}/><Button label="Reset local vault (this device only)" danger onPress={()=>Alert.alert("Reset local vault?","This permanently deletes all chats, contacts and settings stored on this device. This cannot be undone, and only helps if the vault itself is what's broken.",[{text:"Reset",style:"destructive",onPress:async()=>{try{await clearVault();setStartupRetry(k=>k+1)}catch(e){Alert.alert("Reset failed",e instanceof Error?e.message:"Unable to reset local vault.")}}},{text:"Cancel",style:"cancel"}])}/></View></View></View>}return <View style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/>{body}{screen.name==="home"&&<View style={[s.nav,{backgroundColor:theme.card,borderTopColor:theme.line,paddingBottom:insets.bottom}]}>{(["Chats","Stories","Feed","Calls","Settings"] as Tab[]).map(x=><TouchableOpacity key={x} onPress={()=>x==="Settings"?setScreen({name:"settings"}):setTab(x)} style={s.navItem}><Text style={{fontSize:18,color:theme.ink}}>{x==="Chats"?"💬":x==="Stories"?"◉":x==="Feed"?"▦":x==="Calls"?"📞":"⚙"}</Text><Text style={{fontSize:11,color:tab===x?theme.brand:theme.muted,fontWeight:"800"}}>{x}</Text></TouchableOpacity>)}</View>}{call&&<CallOverlay contact={contact} video={call.video} onEnd={endCall} theme={theme}/>}</View>}
+
+function IdentitySetup({
+  theme,
+  onComplete,
+}: {
+  theme: any;
+  onComplete: (identity: Identity) => void;
+}) {
+  const [username, setUsername] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const save = async () => {
+    const normalized = username.trim().replace(/^@/, "").toLowerCase();
+
+    if (!normalized) {
+      setError("Choose a username to continue.");
+      return;
+    }
+
+    if (normalized.length < 3) {
+      setError("Your username must be at least 3 characters.");
+      return;
+    }
+
+    if (normalized.length > 20) {
+      setError("Your username can be at most 20 characters.");
+      return;
+    }
+
+    if (!/^[a-z0-9_]+$/.test(normalized)) {
+      setError("Use only lowercase letters, numbers, and underscores.");
+      return;
+    }
+
+    try {
+      setSaving(true);
+      setError("");
+
+      await updateIdentity({
+        username: normalized,
+        displayName: normalized,
+      });
+
+      const updated = await getIdentity();
+      onComplete(updated);
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? e.message
+          : "Unable to save your NexChat identity."
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <View
+      style={[
+        s.safe,
+        {
+          backgroundColor: theme.bg,
+        },
+      ]}
+    >
+      <StatusBar
+        barStyle={
+          theme.ink === "#FFFFFF"
+            ? "light-content"
+            : "dark-content"
+        }
+      />
+
+      <ScrollView
+        contentContainerStyle={[
+          s.form,
+          {
+            flexGrow: 1,
+            justifyContent: "center",
+            paddingHorizontal: 28,
+          },
+        ]}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View
+          style={{
+            alignItems: "center",
+            marginBottom: 28,
+          }}
+        >
+          <View
+            style={[
+              s.bigAvatar,
+              {
+                backgroundColor: theme.brand,
+                marginBottom: 18,
+              },
+            ]}
+          >
+            <Text
+              style={{
+                color: "white",
+                fontSize: 30,
+                fontWeight: "900",
+              }}
+            >
+              N
+            </Text>
+          </View>
+
+          <Text
+            style={{
+              color: theme.ink,
+              fontSize: 27,
+              fontWeight: "900",
+              textAlign: "center",
+            }}
+          >
+            Create your NexChat identity
+          </Text>
+
+          <Text
+            style={{
+              color: theme.muted,
+              fontSize: 14,
+              textAlign: "center",
+              marginTop: 10,
+              lineHeight: 21,
+            }}
+          >
+            Choose the username people will use to
+            identify you on NexChat.
+          </Text>
+        </View>
+
+        <Text
+          style={[
+            s.label,
+            {
+              color: theme.ink,
+            },
+          ]}
+        >
+          Username
+        </Text>
+
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            borderWidth: 1,
+            borderColor: theme.line,
+            backgroundColor: theme.card,
+            borderRadius: 14,
+            paddingHorizontal: 14,
+          }}
+        >
+          <Text
+            style={{
+              color: theme.muted,
+              fontSize: 16,
+              fontWeight: "800",
+            }}
+          >
+            @
+          </Text>
+
+          <TextInput
+            value={username}
+            onChangeText={(value) => {
+              setUsername(
+                value
+                  .replace(/^@/, "")
+                  .toLowerCase()
+                  .replace(/[^a-z0-9_]/g, "")
+              );
+              setError("");
+            }}
+            autoCapitalize="none"
+            autoCorrect={false}
+            maxLength={20}
+            placeholder="your_username"
+            placeholderTextColor={theme.muted}
+            style={{
+              flex: 1,
+              color: theme.ink,
+              fontSize: 16,
+              paddingVertical: 14,
+              paddingHorizontal: 6,
+            }}
+          />
+        </View>
+
+        {!!error && (
+          <Text
+            style={{
+              color: theme.danger,
+              fontSize: 12,
+              fontWeight: "700",
+              marginTop: 4,
+            }}
+          >
+            {error}
+          </Text>
+        )}
+
+        <Text
+          style={{
+            color: theme.muted,
+            fontSize: 12,
+            lineHeight: 18,
+            marginTop: 6,
+          }}
+        >
+          3–20 characters. Letters, numbers and
+          underscores only.
+        </Text>
+
+        <View
+          style={{
+            marginTop: 24,
+            padding: 16,
+            borderRadius: 16,
+            backgroundColor: theme.card,
+            borderWidth: 1,
+            borderColor: theme.line,
+          }}
+        >
+          <Text
+            style={{
+              color: theme.ink,
+              fontWeight: "900",
+              marginBottom: 5,
+            }}
+          >
+            Your NexChat ID
+          </Text>
+
+          <Text
+            style={{
+              color: theme.muted,
+              fontSize: 13,
+              lineHeight: 19,
+            }}
+          >
+            Your device-generated NexChat ID will remain
+            separate from your username and phone number.
+          </Text>
+        </View>
+
+        <View style={{ marginTop: 22 }}>
+          <Button
+            label={saving ? "Creating identity…" : "Continue"}
+            onPress={save}
+          />
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+
+function AppContent(){const insets=useSafeAreaInsets();const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);const st=useNexChatStore();const [call,setCall]=useState<{id:string;peerId:string;video:boolean;startedAt:string}|null>(null);const beginCall=(peerId:string,video:boolean)=>setCall({id:`call-${Date.now()}-${Math.random().toString(36).slice(2,10)}`,peerId,video,startedAt:new Date().toISOString()});const endCall=async(outcome:{status:CallHistoryEntry["status"];connectedAt?:string;durationSeconds?:number})=>{if(!call)return;const entry:CallHistoryEntry={id:call.id,peerId:call.peerId,type:call.video?"video":"voice",direction:"outgoing",status:outcome.status,startedAt:call.startedAt,connectedAt:outcome.connectedAt,endedAt:new Date().toISOString(),durationSeconds:outcome.durationSeconds};setCall(null);await st.logCall(entry);};const [startupError,setStartupError]=useState<string|null>(null);const [startupRetry,setStartupRetry]=useState(0);const [splashMinDone,setSplashMinDone]=useState(false);useEffect(()=>{(async()=>{try{await initIdentity();await initVault();await st.hydrate();setIdentity(await getIdentity());const bs=getPersistedSettingsSnapshot();const cfg={enabled:bs.backupEnabled,schedule:bs.backupSchedule,destination:bs.backupDestination};if(shouldRunBackup(cfg,bs.lastBackupRunAt??null)){const result=await runBackup(cfg);await st.updateSettings(result.success?{lastBackupRunAt:result.startedAt,lastBackupAttemptAt:result.startedAt,lastBackupError:undefined}:{lastBackupAttemptAt:result.startedAt,lastBackupError:result.error});}setStartupError(null)}catch(e){setStartupError(e instanceof Error?e.message:"NexChat failed to start for an unknown reason.")}})();},[startupRetry]);const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)} onDeleted={()=>setScreen({name:"home"})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})}/>;switch(tab){case"Chats":return <ChatListScreen theme={theme} identity={identity} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme} onStartCall={beginCall}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <StoriesScreen theme={theme} identity={identity}/>;default:return <FeedScreen theme={theme} identity={identity}/>}},[screen,tab,theme,st]);const appReady=identity!==null||startupError!==null;
+const needsIdentitySetup =
+  identity?.displayName === "NexChat User" &&
+  identity?.username === "user";if(!splashMinDone||!appReady){return <BootSplash onMinimumDurationElapsed={()=>setSplashMinDone(true)}/>;}
+if(!startupError&&needsIdentitySetup&&identity){
+  return <IdentitySetup theme={theme} onComplete={updated=>setIdentity(updated)}/>;
+}
+if(startupError){return <View style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/><View style={{flex:1,alignItems:"center",justifyContent:"center",padding:28,gap:14}}><Text style={{fontSize:44}}>⚠️</Text><Text style={{fontSize:19,fontWeight:"900",color:theme.ink,textAlign:"center"}}>NexChat couldn't start</Text><Text style={{color:theme.muted,textAlign:"center"}}>{startupError}</Text><View style={{width:"100%",gap:10,marginTop:10}}><Button label="Try again" onPress={()=>setStartupRetry(k=>k+1)}/><Button label="Reset local vault (this device only)" danger onPress={()=>Alert.alert("Reset local vault?","This permanently deletes all chats, contacts and settings stored on this device. This cannot be undone, and only helps if the vault itself is what's broken.",[{text:"Reset",style:"destructive",onPress:async()=>{try{await clearVault();setStartupRetry(k=>k+1)}catch(e){Alert.alert("Reset failed",e instanceof Error?e.message:"Unable to reset local vault.")}}},{text:"Cancel",style:"cancel"}])}/></View></View></View>}return <View style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/>{body}{screen.name==="home"&&<View style={[s.nav,{backgroundColor:theme.card,borderTopColor:theme.line,paddingBottom:insets.bottom}]}>{(["Chats","Stories","Feed","Calls","Settings"] as Tab[]).map(x=><TouchableOpacity key={x} onPress={()=>x==="Settings"?setScreen({name:"settings"}):setTab(x)} style={s.navItem}><Text style={{fontSize:18,color:theme.ink}}>{x==="Chats"?"💬":x==="Stories"?"◉":x==="Feed"?"▦":x==="Calls"?"📞":"⚙"}</Text><Text style={{fontSize:11,color:tab===x?theme.brand:theme.muted,fontWeight:"800"}}>{x}</Text></TouchableOpacity>)}</View>}{call&&<CallOverlay contact={contact} video={call.video} onEnd={endCall} theme={theme}/>}</View>}
 
 export default function App(){return <SafeAreaProvider><AppContent/></SafeAreaProvider>}
 
