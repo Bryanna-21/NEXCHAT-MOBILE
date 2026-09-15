@@ -1,25 +1,35 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Image,
   Linking,
   Modal,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
+import * as MediaLibrary from "expo-media-library";
+import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import { useVideoPlayer, VideoView } from "expo-video";
 
 import {
   createFeedPost,
+  incrementFeedShare,
   FeedAttachment,
   FeedCreator,
   FeedPost,
   FeedPostType,
   loadFeedPosts,
+  toggleFeedLike,
+  getFeedComments,
+  addFeedComment,
+  FeedComment,
 } from "../core/feed";
 
 type FeedTheme = {
@@ -99,12 +109,178 @@ function formatDate(value: string): string {
   });
 }
 
+function FeedMedia({
+  attachment,
+  theme,
+}: {
+  attachment: FeedAttachment;
+  theme: FeedTheme;
+}) {
+  const kind =
+    attachment.kind ??
+    (attachment.mimeType?.startsWith("image/")
+      ? "image"
+      : attachment.mimeType?.startsWith("video/")
+        ? "video"
+        : attachment.mimeType?.startsWith("audio/")
+          ? "audio"
+          : "file");
+
+  if (kind === "image") {
+    return (
+      <Image
+        source={{ uri: attachment.uri }}
+        style={styles.feedImage}
+        resizeMode="cover"
+      />
+    );
+  }
+
+  if (kind === "video") {
+    return <FeedVideo attachment={attachment} theme={theme} />;
+  }
+
+  if (kind === "audio") {
+    return <FeedAudio attachment={attachment} theme={theme} />;
+  }
+
+  return (
+    <View
+      style={[
+        styles.attachmentCard,
+        {
+          backgroundColor: theme.bg,
+          borderColor: theme.line,
+        },
+      ]}
+    >
+      <Text style={styles.attachmentIcon}>📎</Text>
+
+      <View style={styles.attachmentInfo}>
+        <Text
+          style={[styles.attachmentName, { color: theme.ink }]}
+          numberOfLines={2}
+        >
+          {attachment.name || "Attached file"}
+        </Text>
+
+        <Text style={[styles.attachmentType, { color: theme.muted }]}>
+          {attachment.mimeType || "File"}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+function FeedVideo({
+  attachment,
+  theme,
+}: {
+  attachment: FeedAttachment;
+  theme: FeedTheme;
+}) {
+  const player = useVideoPlayer(attachment.uri, (videoPlayer) => {
+    videoPlayer.loop = false;
+  });
+
+  return (
+    <View
+      style={[
+        styles.videoContainer,
+        {
+          backgroundColor: theme.bg,
+          borderColor: theme.line,
+        },
+      ]}
+    >
+      <VideoView
+        player={player}
+        style={styles.feedVideo}
+        contentFit="contain"
+        nativeControls
+      />
+
+      <Text style={[styles.mediaCaption, { color: theme.muted }]}>
+        {attachment.name || "Video"}
+      </Text>
+    </View>
+  );
+}
+
+function FeedAudio({
+  attachment,
+  theme,
+}: {
+  attachment: FeedAttachment;
+  theme: FeedTheme;
+}) {
+  const player = useAudioPlayer(attachment.uri);
+  const status = useAudioPlayerStatus(player);
+
+  const playing = status.playing;
+
+  const togglePlayback = () => {
+    if (playing) {
+      player.pause();
+    } else {
+      player.play();
+    }
+  };
+
+  return (
+    <View
+      style={[
+        styles.audioCard,
+        {
+          backgroundColor: theme.bg,
+          borderColor: theme.line,
+        },
+      ]}
+    >
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={playing ? "Pause audio" : "Play audio"}
+        onPress={togglePlayback}
+        style={[
+          styles.audioPlayButton,
+          { backgroundColor: theme.brand },
+        ]}
+      >
+        <Text style={styles.audioPlayText}>
+          {playing ? "Ⅱ" : "▶"}
+        </Text>
+      </Pressable>
+
+      <View style={styles.audioInfo}>
+        <Text
+          style={[styles.attachmentName, { color: theme.ink }]}
+          numberOfLines={2}
+        >
+          {attachment.name || "Audio"}
+        </Text>
+
+        <Text style={[styles.attachmentType, { color: theme.muted }]}>
+          {playing ? "Playing" : "Tap to play"}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
 function PostCard({
   post,
   theme,
+  userId,
+  onLike,
+  onComments,
+  onShare,
 }: {
   post: FeedPost;
   theme: FeedTheme;
+  userId: string;
+  onLike: (post: FeedPost) => void;
+  onComments: (post: FeedPost) => void;
+  onShare: (post: FeedPost) => void;
 }) {
   const initials = post.creator.name
     .split(/\s+/)
@@ -120,9 +296,24 @@ function PostCard({
     try {
       await Linking.openURL(post.linkUrl);
     } catch {
-      // Batch 2 will add richer link/error handling.
+      // Link errors will be handled by the feed interaction layer.
     }
   };
+
+  const handleLike = async () => {
+    const result = await toggleFeedLike(post.id, userId);
+
+    if (result.post) {
+      onLike(result.post);
+    }
+  };
+
+  const attachments =
+    post.attachments && post.attachments.length > 0
+      ? post.attachments
+      : post.attachment
+        ? [post.attachment]
+        : [];
 
   return (
     <View
@@ -136,7 +327,10 @@ function PostCard({
     >
       <View style={styles.creatorRow}>
         {post.creator.avatarUri ? (
-          <Image source={{ uri: post.creator.avatarUri }} style={styles.avatar} />
+          <Image
+            source={{ uri: post.creator.avatarUri }}
+            style={styles.avatar}
+          />
         ) : (
           <View
             style={[
@@ -159,6 +353,7 @@ function PostCard({
               ? `@${post.creator.username} · `
               : ""}
             {formatDate(post.createdAt)}
+            {post.updatedAt ? " · edited" : ""}
           </Text>
         </View>
 
@@ -168,7 +363,9 @@ function PostCard({
           hitSlop={10}
           style={styles.moreButton}
         >
-          <Text style={[styles.moreText, { color: theme.muted }]}>•••</Text>
+          <Text style={[styles.moreText, { color: theme.muted }]}>
+            •••
+          </Text>
         </Pressable>
       </View>
 
@@ -202,51 +399,68 @@ function PostCard({
         </Pressable>
       )}
 
-      {post.attachment && (
+      {attachments.map((item, index) => (
         <View
-          style={[
-            styles.attachmentCard,
-            {
-              backgroundColor: theme.bg,
-              borderColor: theme.line,
-            },
-          ]}
+          key={`${post.id}-${item.uri}-${index}`}
+          style={styles.mediaWrapper}
         >
-          <Text style={styles.attachmentIcon}>
-            {post.type === "media" ? "▣" : "📎"}
+          <FeedMedia attachment={item} theme={theme} />
+        </View>
+      ))}
+
+      {!!post.music && (
+        <View style={styles.musicWrapper}>
+          <Text style={[styles.musicLabel, { color: theme.muted }]}>
+            🎵 Attached music
           </Text>
 
-          <View style={styles.attachmentInfo}>
-            <Text
-              style={[styles.attachmentName, { color: theme.ink }]}
-              numberOfLines={2}
-            >
-              {post.attachment.name || "Attached file"}
-            </Text>
-
-            <Text style={[styles.attachmentType, { color: theme.muted }]}>
-              {post.attachment.mimeType || "Attachment"}
-            </Text>
-          </View>
+          <FeedAudio attachment={post.music} theme={theme} />
         </View>
       )}
 
       <View style={[styles.actionBar, { borderTopColor: theme.line }]}>
-        <Pressable style={styles.actionButton}>
-          <Text style={[styles.actionText, { color: theme.muted }]}>
-            ♡ Like
+        <Pressable
+          onPress={handleLike}
+          style={styles.actionButton}
+          accessibilityRole="button"
+          accessibilityLabel={
+            post.likedBy?.includes(userId)
+              ? "Unlike post"
+              : "Like post"
+          }
+        >
+          <Text
+            style={[
+              styles.actionText,
+              {
+                color: post.likedBy?.includes(userId)
+                  ? theme.brand
+                  : theme.muted,
+              },
+            ]}
+          >
+            {post.likedBy?.includes(userId) ? "♥" : "♡"} Like{" "}
+            {post.likedBy?.length ? post.likedBy.length : ""}
           </Text>
         </Pressable>
 
-        <Pressable style={styles.actionButton}>
+        <Pressable
+          onPress={() => onComments(post)}
+          style={styles.actionButton}
+          accessibilityRole="button"
+          accessibilityLabel="Open comments"
+        >
           <Text style={[styles.actionText, { color: theme.muted }]}>
-            ◯ Comment
+            ◯ Comment {post.commentCount ? post.commentCount : ""}
           </Text>
         </Pressable>
 
-        <Pressable style={styles.actionButton}>
+        <Pressable
+          onPress={() => onShare(post)}
+          style={styles.actionButton}
+        >
           <Text style={[styles.actionText, { color: theme.muted }]}>
-            ↗ Share
+            ↗ Share {post.shareCount ? post.shareCount : ""}
           </Text>
         </Pressable>
       </View>
@@ -259,6 +473,12 @@ export function FeedScreen({
   identity,
 }: FeedScreenProps) {
   const [posts, setPosts] = useState<FeedPost[]>([]);
+  const [activeCommentPost, setActiveCommentPost] =
+    useState<FeedPost | null>(null);
+  const [comments, setComments] = useState<FeedComment[]>([]);
+  const [commentText, setCommentText] = useState("");
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [commentSubmitting, setCommentSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [composerOpen, setComposerOpen] = useState(false);
   const [publishing, setPublishing] = useState(false);
@@ -266,10 +486,189 @@ export function FeedScreen({
   const [linkUrl, setLinkUrl] = useState("");
   const [attachment, setAttachment] = useState<FeedAttachment | undefined>();
 
+  const [shareMenuVisible, setShareMenuVisible] = useState(false);
+  const [sharePost, setSharePost] = useState<FeedPost | null>(null);
+
   const creator = useMemo(
     () => getCreator(identity),
     [identity],
   );
+
+  const handlePostLike = useCallback((updatedPost: FeedPost) => {
+    setPosts((current) =>
+      current.map((post) =>
+        post.id === updatedPost.id ? updatedPost : post,
+      ),
+    );
+  }, []);
+
+  const openShareMenu = useCallback((post: FeedPost) => {
+    setSharePost(post);
+    setShareMenuVisible(true);
+  }, []);
+
+  const closeShareMenu = useCallback(() => {
+    setShareMenuVisible(false);
+    setSharePost(null);
+  }, []);
+
+  const handlePostShare = useCallback(async (post: FeedPost) => {
+    try {
+      const message = [
+        post.text.trim(),
+        post.linkUrl?.trim(),
+        post.attachment?.name
+          ? `Attachment: ${post.attachment.name}`
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      await Share.share({
+        message: message || "Shared from NexChat",
+      });
+
+      const updatedPost = await incrementFeedShare(post.id);
+
+      if (!updatedPost) return;
+
+      setPosts((current) =>
+        current.map((item) =>
+          item.id === updatedPost.id ? updatedPost : item,
+        ),
+      );
+    } catch {
+      // User cancelled the native share sheet or sharing failed.
+    }
+  }, []);
+
+  const handlePostDownload = useCallback(async (post: FeedPost) => {
+    const attachment =
+      post.attachment ??
+      post.attachments?.[0] ??
+      post.music;
+
+    if (!attachment) {
+      Alert.alert(
+        "Nothing to download",
+        "This post does not contain downloadable media.",
+      );
+      return;
+    }
+
+    const kind =
+      attachment.kind ??
+      (attachment.mimeType?.startsWith("image/")
+        ? "image"
+        : attachment.mimeType?.startsWith("video/")
+          ? "video"
+          : attachment.mimeType?.startsWith("audio/")
+            ? "audio"
+            : "file");
+
+    if (kind !== "image" && kind !== "video") {
+      Alert.alert(
+        "Not supported yet",
+        "Image and video downloads are available now. Audio and document downloads will be added with the file-download system.",
+      );
+      return;
+    }
+
+    if (!attachment.uri) {
+      Alert.alert(
+        "Download failed",
+        "This media does not have a valid local file.",
+      );
+      return;
+    }
+
+    try {
+      const permission =
+        await MediaLibrary.requestPermissionsAsync();
+
+      if (!permission.granted) {
+        Alert.alert(
+          "Permission required",
+          "NexChat needs permission to save this media to your device.",
+        );
+        return;
+      }
+
+      await MediaLibrary.saveToLibraryAsync(attachment.uri);
+
+      Alert.alert(
+        "Downloaded",
+        `${attachment.name || (kind === "video" ? "Video" : "Image")} was saved to your device.`,
+      );
+    } catch (error) {
+      console.error("Feed download failed:", error);
+
+      Alert.alert(
+        "Download failed",
+        "NexChat could not save this media to your device.",
+      );
+    }
+  }, []);
+
+  const openComments = useCallback(async (post: FeedPost) => {
+    setActiveCommentPost(post);
+    setCommentText("");
+    setCommentsLoading(true);
+
+    try {
+      setComments(await getFeedComments(post.id));
+    } finally {
+      setCommentsLoading(false);
+    }
+  }, []);
+
+  const submitComment = useCallback(async () => {
+    if (!activeCommentPost || !commentText.trim() || commentSubmitting) {
+      return;
+    }
+
+    setCommentSubmitting(true);
+
+    try {
+      const comment = await addFeedComment({
+        postId: activeCommentPost.id,
+        author: creator,
+        text: commentText,
+      });
+
+      if (!comment) return;
+
+      setComments((current) => [...current, comment]);
+      setCommentText("");
+
+      setPosts((current) =>
+        current.map((post) =>
+          post.id === activeCommentPost.id
+            ? {
+                ...post,
+                commentCount: (post.commentCount ?? 0) + 1,
+              }
+            : post,
+        ),
+      );
+
+      setActiveCommentPost((current) =>
+        current
+          ? {
+              ...current,
+              commentCount: (current.commentCount ?? 0) + 1,
+            }
+          : current,
+      );
+    } finally {
+      setCommentSubmitting(false);
+    }
+  }, [
+    activeCommentPost,
+    commentText,
+    commentSubmitting,
+    creator,
+  ]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -412,10 +811,196 @@ export function FeedScreen({
           showsVerticalScrollIndicator={false}
         >
           {posts.map((post) => (
-            <PostCard key={post.id} post={post} theme={theme} />
+            <PostCard
+              key={post.id}
+              post={post}
+              theme={theme}
+              userId={creator.id}
+              onLike={handlePostLike}
+              onComments={openComments}
+              onShare={openShareMenu}
+            />
           ))}
         </ScrollView>
       )}
+
+      <Modal
+        visible={!!activeCommentPost}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setActiveCommentPost(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View
+            style={[
+              styles.commentsSheet,
+              { backgroundColor: theme.card },
+            ]}
+          >
+            <View style={styles.commentsHeader}>
+              <View>
+                <Text style={[styles.commentsTitle, { color: theme.ink }]}>
+                  Comments
+                </Text>
+                <Text style={[styles.commentsSubtitle, { color: theme.muted }]}>
+                  {activeCommentPost?.commentCount ?? comments.length} comments
+                </Text>
+              </View>
+
+              <Pressable
+                onPress={() => setActiveCommentPost(null)}
+                style={styles.commentsCloseButton}
+              >
+                <Text style={[styles.commentsCloseText, { color: theme.ink }]}>
+                  ×
+                </Text>
+              </Pressable>
+            </View>
+
+            {commentsLoading ? (
+              <View style={styles.commentsLoading}>
+                <ActivityIndicator color={theme.brand} />
+              </View>
+            ) : (
+              <ScrollView
+                style={styles.commentsList}
+                contentContainerStyle={styles.commentsListContent}
+                keyboardShouldPersistTaps="handled"
+              >
+                {comments.length === 0 ? (
+                  <View style={styles.emptyComments}>
+                    <Text
+                      style={[
+                        styles.emptyCommentsTitle,
+                        { color: theme.ink },
+                      ]}
+                    >
+                      No comments yet
+                    </Text>
+
+                    <Text
+                      style={[
+                        styles.emptyCommentsText,
+                        { color: theme.muted },
+                      ]}
+                    >
+                      Be the first to comment on this post.
+                    </Text>
+                  </View>
+                ) : (
+                  comments.map((comment) => (
+                    <View key={comment.id} style={styles.commentRow}>
+                      <View
+                        style={[
+                          styles.commentAvatar,
+                          { backgroundColor: theme.bg },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.commentAvatarText,
+                            { color: theme.ink },
+                          ]}
+                        >
+                          {(comment.author.name || "?")
+                            .trim()
+                            .charAt(0)
+                            .toUpperCase()}
+                        </Text>
+                      </View>
+
+                      <View
+                        style={[
+                          styles.commentBubble,
+                          { backgroundColor: theme.bg },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.commentAuthor,
+                            { color: theme.ink },
+                          ]}
+                        >
+                          {comment.author.name}
+                        </Text>
+
+                        {comment.author.username ? (
+                          <Text
+                            style={[
+                              styles.commentUsername,
+                              { color: theme.muted },
+                            ]}
+                          >
+                            @{comment.author.username}
+                          </Text>
+                        ) : null}
+
+                        <Text
+                          style={[
+                            styles.commentBody,
+                            { color: theme.ink },
+                          ]}
+                        >
+                          {comment.text}
+                        </Text>
+                      </View>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
+            )}
+
+            <View
+              style={[
+                styles.commentComposer,
+                { borderTopColor: theme.line },
+              ]}
+            >
+              <TextInput
+                value={commentText}
+                onChangeText={setCommentText}
+                placeholder="Write a comment..."
+                placeholderTextColor={theme.muted}
+                editable={!commentSubmitting}
+                multiline
+                maxLength={1000}
+                style={[
+                  styles.commentInput,
+                  {
+                    color: theme.ink,
+                    backgroundColor: theme.bg,
+                    borderColor: theme.line,
+                  },
+                ]}
+              />
+
+              <Pressable
+                onPress={submitComment}
+                disabled={
+                  commentSubmitting || !commentText.trim()
+                }
+                style={[
+                  styles.commentSendButton,
+                  {
+                    backgroundColor:
+                      commentSubmitting || !commentText.trim()
+                        ? theme.line
+                        : theme.brand,
+                  },
+                ]}
+              >
+                {commentSubmitting ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={styles.commentSendText}>
+                    Send
+                  </Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={composerOpen}
@@ -620,6 +1205,162 @@ export function FeedScreen({
           </View>
         </View>
       </Modal>
+
+      <Modal
+        visible={shareMenuVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={closeShareMenu}
+      >
+        <View style={styles.modalBackdrop}>
+          <View
+            style={[
+              styles.shareMenu,
+              {
+                backgroundColor: theme.card,
+                borderColor: theme.line,
+              },
+            ]}
+          >
+            <View style={styles.shareMenuHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.shareMenuTitle, { color: theme.ink }]}>
+                  Share post
+                </Text>
+
+                <Text style={[styles.shareMenuSubtitle, { color: theme.muted }]}>
+                  Choose how you want to share this post.
+                </Text>
+              </View>
+
+              <Pressable onPress={closeShareMenu}>
+                <Text style={[styles.closeText, { color: theme.ink }]}>
+                  ×
+                </Text>
+              </Pressable>
+            </View>
+
+            <Pressable
+              style={[styles.shareOption, { borderColor: theme.line }]}
+              onPress={() => {
+                if (sharePost) {
+                  closeShareMenu();
+                  void handlePostDownload(sharePost);
+                }
+              }}
+            >
+              <Text style={styles.shareOptionIcon}>↓</Text>
+              <View style={styles.shareOptionText}>
+                <Text style={[styles.shareOptionTitle, { color: theme.ink }]}>
+                  Download
+                </Text>
+                <Text style={[styles.shareOptionSubtitle, { color: theme.muted }]}>
+                  Save the post media to your device
+                </Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={[styles.shareOption, { borderColor: theme.line }]}
+              onPress={() => {}}
+            >
+              <Text style={styles.shareOptionIcon}>💬</Text>
+              <View style={styles.shareOptionText}>
+                <Text style={[styles.shareOptionTitle, { color: theme.ink }]}>
+                  Share to Chat
+                </Text>
+                <Text style={[styles.shareOptionSubtitle, { color: theme.muted }]}>
+                  Send it to a one-to-one conversation
+                </Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={[styles.shareOption, { borderColor: theme.line }]}
+              onPress={() => {}}
+            >
+              <Text style={styles.shareOptionIcon}>👥</Text>
+              <View style={styles.shareOptionText}>
+                <Text style={[styles.shareOptionTitle, { color: theme.ink }]}>
+                  Share to Group
+                </Text>
+                <Text style={[styles.shareOptionSubtitle, { color: theme.muted }]}>
+                  Send it to one of your groups
+                </Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={[styles.shareOption, { borderColor: theme.line }]}
+              onPress={() => {}}
+            >
+              <Text style={styles.shareOptionIcon}>◉</Text>
+              <View style={styles.shareOptionText}>
+                <Text style={[styles.shareOptionTitle, { color: theme.ink }]}>
+                  Share to Status
+                </Text>
+                <Text style={[styles.shareOptionSubtitle, { color: theme.muted }]}>
+                  Post it to your 24-hour status
+                </Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={[styles.shareOption, { borderColor: theme.line }]}
+              onPress={() => {}}
+            >
+              <Text style={styles.shareOptionIcon}>↻</Text>
+              <View style={styles.shareOptionText}>
+                <Text style={[styles.shareOptionTitle, { color: theme.ink }]}>
+                  Reshare
+                </Text>
+                <Text style={[styles.shareOptionSubtitle, { color: theme.muted }]}>
+                  Repost this content like a reshared post
+                </Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={[styles.shareOption, { borderColor: theme.line }]}
+              onPress={() => {}}
+            >
+              <Text style={styles.shareOptionIcon}>✎</Text>
+              <View style={styles.shareOptionText}>
+                <Text style={[styles.shareOptionTitle, { color: theme.ink }]}>
+                  Share to My Feed
+                </Text>
+                <Text style={[styles.shareOptionSubtitle, { color: theme.muted }]}>
+                  Publish this content to your own feed
+                </Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={[
+                styles.shareOption,
+                styles.shareNativeOption,
+                { borderColor: theme.line },
+              ]}
+              onPress={() => {
+                if (sharePost) {
+                  closeShareMenu();
+                  void handlePostShare(sharePost);
+                }
+              }}
+            >
+              <Text style={styles.shareOptionIcon}>↗</Text>
+              <View style={styles.shareOptionText}>
+                <Text style={[styles.shareOptionTitle, { color: theme.ink }]}>
+                  More…
+                </Text>
+                <Text style={[styles.shareOptionSubtitle, { color: theme.muted }]}>
+                  Use Android's sharing options
+                </Text>
+              </View>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -778,6 +1519,72 @@ const styles = StyleSheet.create({
     marginTop: 3,
   },
 
+  feedImage: {
+    width: "100%",
+    height: 260,
+    borderRadius: 12,
+  },
+
+  videoContainer: {
+    width: "100%",
+    borderWidth: 1,
+    borderRadius: 12,
+    overflow: "hidden",
+  },
+
+  feedVideo: {
+    width: "100%",
+    height: 260,
+  },
+
+  mediaCaption: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 12,
+  },
+
+  audioCard: {
+    width: "100%",
+    minHeight: 72,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 10,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+
+  audioPlayButton: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  audioPlayText: {
+    color: "#FFFFFF",
+    fontSize: 18,
+    fontWeight: "700",
+  },
+
+  audioInfo: {
+    flex: 1,
+    marginLeft: 12,
+  },
+
+  mediaWrapper: {
+    marginTop: 12,
+  },
+
+  musicWrapper: {
+    marginTop: 12,
+  },
+
+  musicLabel: {
+    fontSize: 12,
+    marginBottom: 6,
+  },
+
   actionBar: {
     borderTopWidth: StyleSheet.hairlineWidth,
     minHeight: 48,
@@ -838,10 +1645,225 @@ const styles = StyleSheet.create({
     fontWeight: "800",
   },
 
+  commentsSheet: {
+    width: "100%",
+    maxHeight: "82%",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingTop: 8,
+    overflow: "hidden",
+  },
+
+  commentsHeader: {
+    minHeight: 64,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+
+  commentsTitle: {
+    fontSize: 20,
+    fontWeight: "800",
+  },
+
+  commentsSubtitle: {
+    marginTop: 2,
+    fontSize: 12,
+  },
+
+  commentsCloseButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  commentsCloseText: {
+    fontSize: 30,
+    lineHeight: 32,
+    fontWeight: "300",
+  },
+
+  commentsLoading: {
+    minHeight: 240,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  commentsList: {
+    flexGrow: 0,
+  },
+
+  commentsListContent: {
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+  },
+
+  emptyComments: {
+    minHeight: 220,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 30,
+  },
+
+  emptyCommentsTitle: {
+    fontSize: 16,
+    fontWeight: "800",
+    marginBottom: 6,
+  },
+
+  emptyCommentsText: {
+    fontSize: 13,
+    textAlign: "center",
+  },
+
+  commentRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    marginBottom: 12,
+  },
+
+  commentAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 10,
+  },
+
+  commentAvatarText: {
+    fontSize: 14,
+    fontWeight: "800",
+  },
+
+  commentBubble: {
+    flex: 1,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+
+  commentAuthor: {
+    fontSize: 13,
+    fontWeight: "800",
+  },
+
+  commentUsername: {
+    fontSize: 11,
+    marginTop: 1,
+  },
+
+  commentBody: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginTop: 5,
+  },
+
+  commentComposer: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+
+  commentInput: {
+    flex: 1,
+    minHeight: 44,
+    maxHeight: 100,
+    borderWidth: 1,
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 14,
+    marginRight: 8,
+  },
+
+  commentSendButton: {
+    minWidth: 62,
+    height: 44,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 14,
+  },
+
+  commentSendText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+
   modalBackdrop: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.45)",
     justifyContent: "flex-end",
+  },
+
+  shareMenu: {
+    maxHeight: "92%",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 16,
+    paddingTop: 18,
+    paddingBottom: 28,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+
+  shareMenuHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    marginBottom: 10,
+  },
+
+  shareMenuTitle: {
+    fontSize: 22,
+    fontWeight: "900",
+  },
+
+  shareMenuSubtitle: {
+    fontSize: 12,
+    marginTop: 3,
+  },
+
+  shareOption: {
+    minHeight: 64,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 13,
+    marginTop: 8,
+  },
+
+  shareOptionIcon: {
+    width: 36,
+    textAlign: "center",
+    fontSize: 22,
+    marginRight: 10,
+  },
+
+  shareOptionText: {
+    flex: 1,
+  },
+
+  shareOptionTitle: {
+    fontSize: 14,
+    fontWeight: "800",
+  },
+
+  shareOptionSubtitle: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+
+  shareNativeOption: {
+    marginTop: 12,
   },
 
   composer: {
