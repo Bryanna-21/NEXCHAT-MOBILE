@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { FeedProfileScreen } from "./FeedProfileScreen";
 import {
   ActivityIndicator,
   Alert,
@@ -44,6 +45,7 @@ type FeedTheme = {
 type FeedScreenProps = {
   theme: FeedTheme;
   identity?: unknown;
+  onOpenProfile?: (creator: FeedCreator) => void;
 };
 
 function identityValue(
@@ -59,10 +61,11 @@ function identityValue(
 
     if (typeof value === "string" && value.trim()) {
       return value.trim();
+
     }
-  }
 
   return undefined;
+  }
 }
 
 function getCreator(identity: unknown): FeedCreator {
@@ -109,6 +112,20 @@ function formatDate(value: string): string {
   });
 }
 
+let activeFeedVideoPlayer: ReturnType<typeof useVideoPlayer> | null = null;
+
+function safelyPauseFeedVideo(
+  player: ReturnType<typeof useVideoPlayer> | null
+) {
+  if (!player) return;
+
+  try {
+    player.pause();
+  } catch {
+    // Expo may release the native player during unmount/navigation.
+  }
+}
+
 function FeedMedia({
   attachment,
   theme,
@@ -134,7 +151,7 @@ function FeedMedia({
         resizeMode="cover"
       />
     );
-  }
+}
 
   if (kind === "video") {
     return <FeedVideo attachment={attachment} theme={theme} />;
@@ -170,7 +187,7 @@ function FeedMedia({
       </View>
     </View>
   );
-}
+  }
 
 function FeedVideo({
   attachment,
@@ -181,7 +198,46 @@ function FeedVideo({
 }) {
   const player = useVideoPlayer(attachment.uri, (videoPlayer) => {
     videoPlayer.loop = false;
+    safelyPauseFeedVideo(videoPlayer);
   });
+
+  const [playing, setPlaying] = useState(false);
+
+  useEffect(() => {
+    const subscription = player.addListener(
+      "playingChange",
+      ({ isPlaying }) => {
+        setPlaying(isPlaying);
+
+        if (!isPlaying && activeFeedVideoPlayer === player) {
+          activeFeedVideoPlayer = null;
+}
+      },
+    );
+
+    return () => {
+      subscription.remove();
+
+      if (activeFeedVideoPlayer === player) {
+        activeFeedVideoPlayer = null;
+        }
+
+    };
+  }, [player]);
+
+  const togglePlayback = () => {
+    if (player.playing) {
+      safelyPauseFeedVideo(player);
+      return;
+      }
+
+    if (activeFeedVideoPlayer && activeFeedVideoPlayer !== player) {
+      safelyPauseFeedVideo(activeFeedVideoPlayer);
+    }
+
+    activeFeedVideoPlayer = player;
+    player.play();
+  };
 
   return (
     <View
@@ -193,20 +249,35 @@ function FeedVideo({
         },
       ]}
     >
-      <VideoView
-        player={player}
-        style={styles.feedVideo}
-        contentFit="contain"
-        nativeControls
-      />
+      <View style={styles.feedVideoStage}>
+        <VideoView
+          player={player}
+          style={styles.feedVideo}
+          contentFit="contain"
+          nativeControls={false}
+        />
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={playing ? "Pause video" : "Play video"}
+          onPress={() => { console.log("[NEXCHAT VIDEO] BUTTON PRESSED"); togglePlayback(); }}
+          style={[
+            styles.feedVideoPlayButton,
+            { backgroundColor: theme.brand },
+          ]}
+        >
+          <Text style={styles.feedVideoPlayText}>
+            {playing ? "Ⅱ" : "▶"}
+          </Text>
+        </Pressable>
+      </View>
 
       <Text style={[styles.mediaCaption, { color: theme.muted }]}>
         {attachment.name || "Video"}
       </Text>
     </View>
   );
-}
-
+    }
 function FeedAudio({
   attachment,
   theme,
@@ -224,7 +295,7 @@ function FeedAudio({
       player.pause();
     } else {
       player.play();
-    }
+}
   };
 
   return (
@@ -240,7 +311,7 @@ function FeedAudio({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={playing ? "Pause audio" : "Play audio"}
-        onPress={togglePlayback}
+        onPress={() => { console.log("[NEXCHAT VIDEO] BUTTON PRESSED"); togglePlayback(); }}
         style={[
           styles.audioPlayButton,
           { backgroundColor: theme.brand },
@@ -265,7 +336,7 @@ function FeedAudio({
       </View>
     </View>
   );
-}
+    }
 
 function PostCard({
   post,
@@ -274,6 +345,7 @@ function PostCard({
   onLike,
   onComments,
   onShare,
+  onProfile,
 }: {
   post: FeedPost;
   theme: FeedTheme;
@@ -281,6 +353,7 @@ function PostCard({
   onLike: (post: FeedPost) => void;
   onComments: (post: FeedPost) => void;
   onShare: (post: FeedPost) => void;
+  onProfile?: (creator: FeedCreator) => void;
 }) {
   const initials = post.creator.name
     .split(/\s+/)
@@ -297,7 +370,7 @@ function PostCard({
       await Linking.openURL(post.linkUrl);
     } catch {
       // Link errors will be handled by the feed interaction layer.
-    }
+}
   };
 
   const handleLike = async () => {
@@ -326,7 +399,18 @@ function PostCard({
       ]}
     >
       <View style={styles.creatorRow}>
-        {post.creator.avatarUri ? (
+        <Pressable
+          onPress={() => onProfile?.(post.creator)}
+          disabled={!onProfile}
+          accessibilityRole={onProfile ? "button" : undefined}
+          accessibilityLabel={
+            onProfile
+              ? `Open ${post.creator.name}'s profile`
+              : undefined
+    }
+          style={styles.creatorProfileButton}
+        >
+          {post.creator.avatarUri ? (
           <Image
             source={{ uri: post.creator.avatarUri }}
             style={styles.avatar}
@@ -356,6 +440,8 @@ function PostCard({
             {post.updatedAt ? " · edited" : ""}
           </Text>
         </View>
+
+        </Pressable>
 
         <Pressable
           accessibilityRole="button"
@@ -466,15 +552,17 @@ function PostCard({
       </View>
     </View>
   );
-}
+          }
 
 export function FeedScreen({
   theme,
   identity,
+  onOpenProfile,
 }: FeedScreenProps) {
   const [posts, setPosts] = useState<FeedPost[]>([]);
   const [activeCommentPost, setActiveCommentPost] =
     useState<FeedPost | null>(null);
+  const [profileCreator, setProfileCreator] = useState<FeedCreator | null>(null);
   const [comments, setComments] = useState<FeedComment[]>([]);
   const [commentText, setCommentText] = useState("");
   const [commentsLoading, setCommentsLoading] = useState(false);
@@ -493,6 +581,18 @@ export function FeedScreen({
     () => getCreator(identity),
     [identity],
   );
+  const handleOpenProfile = useCallback(
+    (selectedCreator: FeedCreator) => {
+      if (onOpenProfile) {
+        onOpenProfile(selectedCreator);
+        return;
+}
+
+      setProfileCreator(selectedCreator);
+    },
+    [onOpenProfile],
+  );
+
 
   const handlePostLike = useCallback((updatedPost: FeedPost) => {
     setPosts((current) =>
@@ -513,6 +613,7 @@ export function FeedScreen({
   }, []);
 
   const handlePostShare = useCallback(async (post: FeedPost) => {
+    setPublishing(true);
     try {
       const message = [
         post.text.trim(),
@@ -539,7 +640,7 @@ export function FeedScreen({
       );
     } catch {
       // User cancelled the native share sheet or sharing failed.
-    }
+      }
   }, []);
 
   const handlePostDownload = useCallback(async (post: FeedPost) => {
@@ -582,6 +683,7 @@ export function FeedScreen({
       return;
     }
 
+    setPublishing(true);
     try {
       const permission =
         await MediaLibrary.requestPermissionsAsync();
@@ -592,7 +694,7 @@ export function FeedScreen({
           "NexChat needs permission to save this media to your device.",
         );
         return;
-      }
+    }
 
       await MediaLibrary.saveToLibraryAsync(attachment.uri);
 
@@ -607,7 +709,7 @@ export function FeedScreen({
         "Download failed",
         "NexChat could not save this media to your device.",
       );
-    }
+      }
   }, []);
 
   const openComments = useCallback(async (post: FeedPost) => {
@@ -615,6 +717,7 @@ export function FeedScreen({
     setCommentText("");
     setCommentsLoading(true);
 
+    setPublishing(true);
     try {
       setComments(await getFeedComments(post.id));
     } finally {
@@ -629,6 +732,7 @@ export function FeedScreen({
 
     setCommentSubmitting(true);
 
+    setPublishing(true);
     try {
       const comment = await addFeedComment({
         postId: activeCommentPost.id,
@@ -647,7 +751,7 @@ export function FeedScreen({
             ? {
                 ...post,
                 commentCount: (post.commentCount ?? 0) + 1,
-              }
+    }
             : post,
         ),
       );
@@ -657,12 +761,12 @@ export function FeedScreen({
           ? {
               ...current,
               commentCount: (current.commentCount ?? 0) + 1,
-            }
+              }
           : current,
       );
     } finally {
       setCommentSubmitting(false);
-    }
+            }
   }, [
     activeCommentPost,
     commentText,
@@ -673,6 +777,7 @@ export function FeedScreen({
   const refresh = useCallback(async () => {
     setLoading(true);
 
+    setPublishing(true);
     try {
       setPosts(await loadFeedPosts());
     } finally {
@@ -698,6 +803,7 @@ export function FeedScreen({
   };
 
   const pickFile = async () => {
+    setPublishing(true);
     try {
       const result = await DocumentPicker.getDocumentAsync({
         type: "*/*",
@@ -733,7 +839,6 @@ export function FeedScreen({
     }
 
     setPublishing(true);
-
     try {
       await createFeedPost({
         type,
@@ -750,6 +855,25 @@ export function FeedScreen({
       setPublishing(false);
     }
   };
+
+  const pauseFeedVideos = useCallback(() => {
+    if (activeFeedVideoPlayer) {
+      safelyPauseFeedVideo(activeFeedVideoPlayer);
+      activeFeedVideoPlayer = null;
+    }
+  }, []);
+
+  if (profileCreator) {
+    return (
+      <FeedProfileScreen
+        theme={theme}
+        creator={profileCreator}
+        posts={posts}
+        currentUserId={creator.id}
+        onBack={() => setProfileCreator(null)}
+      />
+    );
+  }
 
   return (
     <View style={[styles.container, { backgroundColor: theme.bg }]}>
@@ -801,6 +925,7 @@ export function FeedScreen({
           <Pressable
             onPress={() => setComposerOpen(true)}
             style={[styles.emptyButton, { backgroundColor: theme.brand }]}
+
           >
             <Text style={styles.emptyButtonText}>Create your first post</Text>
           </Pressable>
@@ -808,6 +933,8 @@ export function FeedScreen({
       ) : (
         <ScrollView
           contentContainerStyle={styles.feed}
+          onScrollBeginDrag={pauseFeedVideos}
+          onMomentumScrollBegin={pauseFeedVideos}
           showsVerticalScrollIndicator={false}
         >
           {posts.map((post) => (
@@ -819,6 +946,7 @@ export function FeedScreen({
               onLike={handlePostLike}
               onComments={openComments}
               onShare={openShareMenu}
+              onProfile={handleOpenProfile}
             />
           ))}
         </ScrollView>
@@ -978,7 +1106,7 @@ export function FeedScreen({
                 onPress={submitComment}
                 disabled={
                   commentSubmitting || !commentText.trim()
-                }
+    }
                 style={[
                   styles.commentSendButton,
                   {
@@ -1174,7 +1302,7 @@ export function FeedScreen({
                           ? "link"
                           : "text",
                     )
-                  }
+                }
                   disabled={
                     publishing ||
                     (!text.trim() &&
@@ -1246,7 +1374,7 @@ export function FeedScreen({
                 if (sharePost) {
                   closeShareMenu();
                   void handlePostDownload(sharePost);
-                }
+                  }
               }}
             >
               <Text style={styles.shareOptionIcon}>↓</Text>
@@ -1363,7 +1491,7 @@ export function FeedScreen({
       </Modal>
     </View>
   );
-}
+                }
 
 const styles = StyleSheet.create({
   container: {
@@ -1419,6 +1547,12 @@ const styles = StyleSheet.create({
 
   creatorRow: {
     padding: 14,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+
+  creatorProfileButton: {
+    flex: 1,
     flexDirection: "row",
     alignItems: "center",
   },
@@ -1535,6 +1669,31 @@ const styles = StyleSheet.create({
   feedVideo: {
     width: "100%",
     height: 260,
+  },
+
+  feedVideoStage: {
+    width: "100%",
+    height: 260,
+    position: "relative",
+  },
+
+  feedVideoPlayButton: {
+    position: "absolute",
+    left: "50%",
+    top: "50%",
+    width: 58,
+    height: 58,
+    marginLeft: -29,
+    marginTop: -29,
+    borderRadius: 29,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  feedVideoPlayText: {
+    color: "#FFFFFF",
+    fontSize: 22,
+    fontWeight: "800",
   },
 
   mediaCaption: {

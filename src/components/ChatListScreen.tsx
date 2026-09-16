@@ -189,46 +189,99 @@ export function ChatListScreen({
     );
   };
 
-  const chatActionsOptions: ActionSheetOption[] = chatActionsFor
-    ? (() => {
-        const conv = st.conversations.find((c) => c.peerId === chatActionsFor);
-        return [
-          { text: "Peek", onPress: () => setPeekPeerId(chatActionsFor) },
-          {
-            text: conv?.pinned ? "Unpin" : "Pin",
-            onPress: () => {
-              if (conv?.pinned) {
-                st.pinConversation(chatActionsFor, false);
-              } else {
-                setPinMenuFor(chatActionsFor);
-              }
-            },
+const chatActionsOptions: ActionSheetOption[] = chatActionsFor
+  ? (() => {
+      const conv = st.conversations.find((c) => c.peerId === chatActionsFor);
+      const isUnread = (conv?.unreadCount ?? 0) > 0;
+
+      return [
+        {
+          text: "Peek",
+          onPress: () => setPeekPeerId(chatActionsFor),
+        },
+        {
+          text: isUnread ? "Mark as Read" : "Mark as Unread",
+          onPress: () =>
+            st.setConversation(chatActionsFor, {
+              unreadCount: isUnread ? 0 : 1,
+            }),
+        },
+        {
+          text: conv?.pinned ? "Unpin" : "Pin",
+          onPress: () => {
+            if (conv?.pinned) {
+              st.pinConversation(chatActionsFor, false);
+            } else {
+              setPinMenuFor(chatActionsFor);
+            }
           },
-          {
-            text: conv?.muted ? "Unmute" : "Mute",
-            onPress: () => st.setConversation(chatActionsFor, { muted: !conv?.muted }),
+        },
+        {
+          text: conv?.muted ? "Unmute" : "Mute",
+          onPress: () =>
+            st.setConversation(chatActionsFor, {
+              muted: !conv?.muted,
+            }),
+        },
+        {
+          text: conv?.archived ? "Unarchive" : "Archive",
+          onPress: () =>
+            st.archiveConversation(chatActionsFor, !conv?.archived),
+        },
+        {
+          text: "Select",
+          onPress: () => {
+            setSelectMode(true);
+            setSelectedIds(new Set([`c-${chatActionsFor}`]));
           },
-          { text: "Archive", onPress: () => st.archiveConversation(chatActionsFor, true) },
-          {
-            text: "Select",
-            onPress: () => {
-              setSelectMode(true);
-              setSelectedIds(new Set([`c-${chatActionsFor}`]));
-            },
-          },
-          {
-            text: "Delete chat",
-            style: "destructive",
-            onPress: () =>
-              Alert.alert("Delete chat?", "This removes the entire conversation. This cannot be undone.", [
-                { text: "Delete", style: "destructive", onPress: () => st.deleteConversation(chatActionsFor) },
-                { text: "Cancel", style: "cancel" },
-              ]),
-          },
-          { text: "Cancel", style: "cancel" },
-        ];
-      })()
-    : [];
+        },
+        {
+          text: "Clear chat",
+          style: "destructive",
+          onPress: () =>
+            Alert.alert(
+              "Clear chat?",
+              "This removes all messages from this conversation on this device. The conversation itself will remain.",
+              [
+                {
+                  text: "Clear",
+                  style: "destructive",
+                  onPress: () => st.clearConversation(chatActionsFor),
+                },
+                {
+                  text: "Cancel",
+                  style: "cancel",
+                },
+              ]
+            ),
+        },
+        {
+          text: "Delete chat",
+          style: "destructive",
+          onPress: () =>
+            Alert.alert(
+              "Delete chat?",
+              "This permanently removes the entire conversation from this device. This cannot be undone.",
+              [
+                {
+                  text: "Delete",
+                  style: "destructive",
+                  onPress: () => st.deleteConversation(chatActionsFor),
+                },
+                {
+                  text: "Cancel",
+                  style: "cancel",
+                },
+              ]
+            ),
+        },
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+      ];
+    })()
+  : [];
 
   const pinMenuOptions: ActionSheetOption[] = pinMenuFor
     ? [
