@@ -1,9 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { FeedProfileScreen } from "./FeedProfileScreen";
 import {
   ActivityIndicator,
   Alert,
   Image,
+  KeyboardAvoidingView,
+  PanResponder,
+  Platform,
   Linking,
   Modal,
   Pressable,
@@ -14,23 +23,33 @@ import {
   TextInput,
   View,
 } from "react-native";
-import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
+import * as ImagePicker from "expo-image-picker";
 import * as MediaLibrary from "expo-media-library";
+import * as Clipboard from "expo-clipboard";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { useVideoPlayer, VideoView } from "expo-video";
 
 import {
   createFeedPost,
+  updateFeedPost,
   incrementFeedShare,
   FeedAttachment,
   FeedCreator,
   FeedPost,
+  FeedPostAudience,
   FeedPostType,
   loadFeedPosts,
+  setFeedPostAudience,
   toggleFeedLike,
   getFeedComments,
   addFeedComment,
   FeedComment,
+  toggleFeedPostPinned,
+  toggleFeedPostNotifications,
+  archiveFeedPost,
+  deleteFeedPost,
 } from "../core/feed";
 
 type FeedTheme = {
@@ -126,12 +145,131 @@ function safelyPauseFeedVideo(
   }
 }
 
+function FeedMediaCarousel({
+  attachments,
+  theme,
+  isActive = false,
+  onVideoEnd,
+}: {
+  attachments: FeedAttachment[];
+  theme: FeedTheme;
+  isActive?: boolean;
+  onVideoEnd?: () => boolean;
+}) {
+  const [page, setPage] = useState(0);
+  const [carouselWidth, setCarouselWidth] = useState(0);
+  const carouselRef = useRef<ScrollView>(null);
+
+  const handleScroll = (event: any) => {
+    const offsetX = event.nativeEvent.contentOffset.x;
+    const containerWidth = event.nativeEvent.layoutMeasurement.width;
+
+    if (!containerWidth) return;
+
+    const nextPage = Math.round(offsetX / containerWidth);
+
+    if (
+      nextPage >= 0 &&
+      nextPage < attachments.length
+    ) {
+      setPage(nextPage);
+    }
+  };
+
+  const handleVideoEnd = (index: number): boolean => {
+    if (index + 1 < attachments.length) {
+      const nextPage = index + 1;
+
+      setPage(nextPage);
+
+      if (carouselWidth > 0) {
+        carouselRef.current?.scrollTo({
+          x: nextPage * carouselWidth,
+          animated: true,
+        });
+      }
+
+      return true;
+    }
+
+    return onVideoEnd?.() ?? false;
+  };
+
+  return (
+    <View
+      onLayout={(event) => {
+        const width = event.nativeEvent.layout.width;
+
+        if (width > 0 && width !== carouselWidth) {
+          setCarouselWidth(width);
+        }
+      }}
+    >
+      <ScrollView
+        ref={carouselRef}
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
+      >
+        {attachments.map((item, index) => (
+          <View
+            key={`${item.uri}-${index}`}
+            style={[
+              styles.carouselPage,
+              { width: carouselWidth || "100%" },
+            ]}
+          >
+            <FeedMedia
+              attachment={item}
+              theme={theme}
+              isActive={isActive && page === index}
+              onVideoEnd={() => handleVideoEnd(index)}
+            />
+          </View>
+        ))}
+      </ScrollView>
+
+      {attachments.length > 1 && (
+        <View style={styles.carouselIndicator}>
+          <Text style={styles.carouselIndicatorText}>
+            {page + 1} / {attachments.length}
+          </Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+function formatAttachmentSize(size?: number) {
+  if (!size || size <= 0) return "File";
+
+  if (size < 1024) {
+    return `${size} B`;
+  }
+
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+
+  if (size < 1024 * 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 function FeedMedia({
   attachment,
   theme,
+  isActive = false,
+  onVideoEnd,
 }: {
   attachment: FeedAttachment;
   theme: FeedTheme;
+  isActive?: boolean;
+  onVideoEnd?: () => boolean;
 }) {
   const kind =
     attachment.kind ??
@@ -145,56 +283,61 @@ function FeedMedia({
 
   if (kind === "image") {
     return (
-      <Image
-        source={{ uri: attachment.uri }}
-        style={styles.feedImage}
-        resizeMode="cover"
-      />
+      <View style={styles.feedMediaOverlayContainer}>
+        <Image
+          source={{ uri: attachment.uri }}
+          style={styles.feedImage}
+          resizeMode="cover"
+        />
+
+        {attachment.overlayText?.trim() ? (
+          <View
+            pointerEvents="none"
+            style={[
+              styles.mediaOverlayPreview,
+              {
+                left: `${(attachment.overlayX ?? 0.5) * 100}%`,
+                top: `${(attachment.overlayY ?? 0.5) * 100}%`,
+              },
+            ]}
+          >
+            <Text style={styles.mediaOverlayText}>
+              {attachment.overlayText}
+            </Text>
+          </View>
+        ) : null}
+      </View>
     );
-}
+  }
 
   if (kind === "video") {
-    return <FeedVideo attachment={attachment} theme={theme} />;
+    return (
+      <FeedVideo
+        attachment={attachment}
+        theme={theme}
+        autoPlay={isActive}
+        onVideoEnd={onVideoEnd}
+      />
+    );
   }
 
   if (kind === "audio") {
     return <FeedAudio attachment={attachment} theme={theme} />;
   }
 
-  return (
-    <View
-      style={[
-        styles.attachmentCard,
-        {
-          backgroundColor: theme.bg,
-          borderColor: theme.line,
-        },
-      ]}
-    >
-      <Text style={styles.attachmentIcon}>📎</Text>
-
-      <View style={styles.attachmentInfo}>
-        <Text
-          style={[styles.attachmentName, { color: theme.ink }]}
-          numberOfLines={2}
-        >
-          {attachment.name || "Attached file"}
-        </Text>
-
-        <Text style={[styles.attachmentType, { color: theme.muted }]}>
-          {attachment.mimeType || "File"}
-        </Text>
-      </View>
-    </View>
-  );
-  }
+  return null;
+}
 
 function FeedVideo({
   attachment,
   theme,
+  autoPlay = false,
+  onVideoEnd,
 }: {
   attachment: FeedAttachment;
   theme: FeedTheme;
+  autoPlay?: boolean;
+  onVideoEnd?: () => boolean;
 }) {
   const player = useVideoPlayer(attachment.uri, (videoPlayer) => {
     videoPlayer.loop = false;
@@ -202,16 +345,22 @@ function FeedVideo({
   });
 
   const [playing, setPlaying] = useState(false);
+  const [manualPaused, setManualPaused] = useState(false);
 
   useEffect(() => {
     const subscription = player.addListener(
       "playingChange",
       ({ isPlaying }) => {
+        console.log("[NEXCHAT VIDEO] PLAYING CHANGE", {
+          uri: attachment.uri,
+          isPlaying,
+        });
+
         setPlaying(isPlaying);
 
         if (!isPlaying && activeFeedVideoPlayer === player) {
           activeFeedVideoPlayer = null;
-}
+        }
       },
     );
 
@@ -220,23 +369,158 @@ function FeedVideo({
 
       if (activeFeedVideoPlayer === player) {
         activeFeedVideoPlayer = null;
-        }
-
-    };
-  }, [player]);
-
-  const togglePlayback = () => {
-    if (player.playing) {
-      safelyPauseFeedVideo(player);
-      return;
       }
+
+      safelyPauseFeedVideo(player);
+    };
+  }, [player, attachment.uri]);
+
+  useEffect(() => {
+    if (!autoPlay) {
+      setManualPaused(false);
+
+      if (activeFeedVideoPlayer === player) {
+        activeFeedVideoPlayer = null;
+      }
+
+      safelyPauseFeedVideo(player);
+
+      console.log("[NEXCHAT VIDEO] AUTO PAUSE / OUT OF VIEW", {
+        uri: attachment.uri,
+      });
+
+      setPlaying(false);
+
+      return;
+    }
+
+    if (manualPaused) {
+      return;
+    }
 
     if (activeFeedVideoPlayer && activeFeedVideoPlayer !== player) {
       safelyPauseFeedVideo(activeFeedVideoPlayer);
     }
 
     activeFeedVideoPlayer = player;
-    player.play();
+
+    /*
+     * If this player previously reached the end, reset it before
+     * auto-playing again. Otherwise Expo can remain at the end
+     * position and appear to play silently.
+     */
+    try {
+      if (
+        player.duration > 0 &&
+        player.currentTime >= player.duration - 0.15
+      ) {
+        console.log("[NEXCHAT VIDEO] RESET AFTER END", {
+          uri: attachment.uri,
+        });
+
+        player.currentTime = 0;
+      }
+
+      console.log("[NEXCHAT VIDEO] AUTO PLAY", {
+        uri: attachment.uri,
+        currentTime: player.currentTime,
+        duration: player.duration,
+      });
+
+      setPlaying(true);
+      player.play();
+    } catch (error) {
+      console.log("[NEXCHAT VIDEO] AUTO PLAY ERROR", error);
+      setPlaying(false);
+    }
+  }, [autoPlay, manualPaused, player, attachment.uri]);
+
+  useEffect(() => {
+    const subscription = player.addListener(
+      "playToEnd",
+      () => {
+        console.log("[NEXCHAT VIDEO] PLAY TO END", {
+          uri: attachment.uri,
+        });
+
+        const handled = onVideoEnd?.() ?? false;
+
+        if (handled) {
+          console.log("[NEXCHAT VIDEO] MOVING TO NEXT VIDEO", {
+            uri: attachment.uri,
+          });
+
+          return;
+        }
+
+        /*
+         * No later video exists.
+         * Replay this video from the beginning instead of
+         * manually setting currentTime and calling play().
+         */
+        console.log("[NEXCHAT VIDEO] LAST VIDEO - REPLAY", {
+          uri: attachment.uri,
+        });
+
+        try {
+          activeFeedVideoPlayer = player;
+          setManualPaused(false);
+          setPlaying(true);
+          player.replay();
+        } catch (error) {
+          console.log("[NEXCHAT VIDEO] REPLAY ERROR", error);
+          setPlaying(false);
+        }
+      },
+    );
+
+    return () => {
+      subscription.remove();
+    };
+  }, [player, attachment.uri, onVideoEnd]);
+
+  const togglePlayback = () => {
+    console.log("[NEXCHAT VIDEO] TAP", {
+      uri: attachment.uri,
+      playing,
+      playerPlaying: player.playing,
+      activeSamePlayer: activeFeedVideoPlayer === player,
+      hasActivePlayer: !!activeFeedVideoPlayer,
+    });
+
+    if (playing) {
+      console.log("[NEXCHAT VIDEO] ACTION = PAUSE");
+
+      setManualPaused(true);
+      setPlaying(false);
+
+      try {
+        player.pause();
+      } catch (error) {
+        console.log("[NEXCHAT VIDEO] PAUSE ERROR", error);
+      }
+
+      return;
+    }
+
+    if (activeFeedVideoPlayer && activeFeedVideoPlayer !== player) {
+      console.log("[NEXCHAT VIDEO] PAUSING OTHER VIDEO");
+      safelyPauseFeedVideo(activeFeedVideoPlayer);
+    }
+
+    activeFeedVideoPlayer = player;
+    setManualPaused(false);
+
+    console.log("[NEXCHAT VIDEO] ACTION = PLAY");
+
+    setPlaying(true);
+
+    try {
+      player.play();
+    } catch (error) {
+      console.log("[NEXCHAT VIDEO] PLAY ERROR", error);
+      setPlaying(false);
+    }
   };
 
   return (
@@ -257,18 +541,48 @@ function FeedVideo({
           nativeControls={false}
         />
 
+        {attachment.overlayText?.trim() ? (
+          <View
+            pointerEvents="none"
+            style={[
+              styles.mediaOverlayPreview,
+              {
+                left: `${(attachment.overlayX ?? 0.5) * 100}%`,
+                top: `${(attachment.overlayY ?? 0.5) * 100}%`,
+              },
+            ]}
+          >
+            <Text style={styles.mediaOverlayText}>
+              {attachment.overlayText}
+            </Text>
+          </View>
+        ) : null}
+
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={playing ? "Pause video" : "Play video"}
-          onPress={() => { console.log("[NEXCHAT VIDEO] BUTTON PRESSED"); togglePlayback(); }}
-          style={[
-            styles.feedVideoPlayButton,
-            { backgroundColor: theme.brand },
-          ]}
+          accessibilityLabel={
+            playing ? "Pause video" : "Play video"
+          }
+          onPress={togglePlayback}
+          style={StyleSheet.absoluteFillObject}
         >
-          <Text style={styles.feedVideoPlayText}>
-            {playing ? "Ⅱ" : "▶"}
-          </Text>
+          {!playing ? (
+            <View
+              pointerEvents="none"
+              style={styles.feedVideoPausedOverlay}
+            >
+              <View
+                style={[
+                  styles.feedVideoPlayOverlay,
+                  { backgroundColor: theme.brand },
+                ]}
+              >
+                <Text style={styles.feedVideoPlayOverlayText}>
+                  ▶
+                </Text>
+              </View>
+            </View>
+          ) : null}
         </Pressable>
       </View>
 
@@ -277,7 +591,8 @@ function FeedVideo({
       </Text>
     </View>
   );
-    }
+}
+
 function FeedAudio({
   attachment,
   theme,
@@ -311,7 +626,7 @@ function FeedAudio({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={playing ? "Pause audio" : "Play audio"}
-        onPress={() => { console.log("[NEXCHAT VIDEO] BUTTON PRESSED"); togglePlayback(); }}
+        onPress={togglePlayback}
         style={[
           styles.audioPlayButton,
           { backgroundColor: theme.brand },
@@ -346,6 +661,10 @@ function PostCard({
   onComments,
   onShare,
   onProfile,
+  onPostMenu,
+  isActive = false,
+  onVideoEnd,
+  onLayout,
 }: {
   post: FeedPost;
   theme: FeedTheme;
@@ -354,6 +673,10 @@ function PostCard({
   onComments: (post: FeedPost) => void;
   onShare: (post: FeedPost) => void;
   onProfile?: (creator: FeedCreator) => void;
+  onPostMenu: (post: FeedPost) => void;
+  isActive?: boolean;
+  onVideoEnd?: () => boolean;
+  onLayout?: (event: any) => void;
 }) {
   const initials = post.creator.name
     .split(/\s+/)
@@ -390,6 +713,7 @@ function PostCard({
 
   return (
     <View
+      onLayout={onLayout}
       style={[
         styles.post,
         {
@@ -444,6 +768,7 @@ function PostCard({
         </Pressable>
 
         <Pressable
+          onPress={() => onPostMenu(post)}
           accessibilityRole="button"
           accessibilityLabel="Post options"
           hitSlop={10}
@@ -485,14 +810,25 @@ function PostCard({
         </Pressable>
       )}
 
-      {attachments.map((item, index) => (
-        <View
-          key={`${post.id}-${item.uri}-${index}`}
-          style={styles.mediaWrapper}
-        >
-          <FeedMedia attachment={item} theme={theme} />
+      {attachments.length > 1 ? (
+        <View style={styles.mediaWrapper}>
+          <FeedMediaCarousel
+            attachments={attachments}
+            theme={theme}
+            isActive={isActive}
+            onVideoEnd={onVideoEnd}
+          />
         </View>
-      ))}
+      ) : attachments.length === 1 ? (
+        <View style={styles.mediaWrapper}>
+          <FeedMedia
+            attachment={attachments[0]}
+            theme={theme}
+            isActive={isActive}
+            onVideoEnd={onVideoEnd}
+          />
+        </View>
+      ) : null}
 
       {!!post.music && (
         <View style={styles.musicWrapper}>
@@ -563,16 +899,83 @@ export function FeedScreen({
   const [activeCommentPost, setActiveCommentPost] =
     useState<FeedPost | null>(null);
   const [profileCreator, setProfileCreator] = useState<FeedCreator | null>(null);
+  const [postMenuPost, setPostMenuPost] = useState<FeedPost | null>(null);
+  const [audiencePost, setAudiencePost] = useState<FeedPost | null>(null);
+
+  const feedScrollRef = useRef<ScrollView>(null);
+  const feedScrollYRef = useRef(0);
+  const feedViewportHeightRef = useRef(0);
+  const postLayoutsRef = useRef<
+    Record<string, { y: number; height: number }>
+  >({});
+  const [activeVideoPostId, setActiveVideoPostId] = useState<string | null>(
+    null,
+  );
   const [comments, setComments] = useState<FeedComment[]>([]);
   const [commentText, setCommentText] = useState("");
   const [commentsLoading, setCommentsLoading] = useState(false);
   const [commentSubmitting, setCommentSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [composerOpen, setComposerOpen] = useState(false);
+  const [editingPost, setEditingPost] = useState<FeedPost | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [text, setText] = useState("");
   const [linkUrl, setLinkUrl] = useState("");
   const [attachment, setAttachment] = useState<FeedAttachment | undefined>();
+  const [overlayText, setOverlayText] = useState("");
+  const [overlayX, setOverlayX] = useState(0.5);
+  const [overlayY, setOverlayY] = useState(0.5);
+  const [overlayEditorOpen, setOverlayEditorOpen] = useState(false);
+
+  const overlayDragStart = useRef({ x: 0.5, y: 0.5 });
+
+  const overlayPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+
+      onPanResponderGrant: () => {
+        overlayDragStart.current = {
+          x: overlayX,
+          y: overlayY,
+        };
+      },
+
+      onPanResponderMove: (_, gestureState) => {
+        const nextX = Math.max(
+          0.08,
+          Math.min(
+            0.92,
+            overlayDragStart.current.x + gestureState.dx / 300,
+          ),
+        );
+
+        const nextY = Math.max(
+          0.08,
+          Math.min(
+            0.92,
+            overlayDragStart.current.y + gestureState.dy / 240,
+          ),
+        );
+
+        setOverlayX(nextX);
+        setOverlayY(nextY);
+      },
+
+      onPanResponderRelease: () => {
+        setAttachment((current) =>
+          current
+            ? {
+                ...current,
+                overlayText,
+                overlayX,
+                overlayY,
+              }
+            : current,
+        );
+      },
+    }),
+  ).current;
 
   const [shareMenuVisible, setShareMenuVisible] = useState(false);
   const [sharePost, setSharePost] = useState<FeedPost | null>(null);
@@ -602,6 +1005,101 @@ export function FeedScreen({
     );
   }, []);
 
+  const openPostMenu = useCallback((post: FeedPost) => {
+    setPostMenuPost(post);
+  }, []);
+
+  const closePostMenu = useCallback(() => {
+    setPostMenuPost(null);
+  }, []);
+
+  const openAudienceSelector = useCallback(() => {
+    if (!postMenuPost) return;
+
+    setAudiencePost(postMenuPost);
+    setPostMenuPost(null);
+  }, [postMenuPost]);
+
+  const updatePostInFeed = useCallback((updatedPost: FeedPost | null) => {
+    if (!updatedPost) return;
+
+    setPosts((current) =>
+      current
+        .map((post) =>
+          post.id === updatedPost.id ? updatedPost : post,
+        )
+        .filter((post) => !post.archived),
+    );
+
+    setPostMenuPost(null);
+  }, []);
+
+  const handleSetPostAudience = useCallback(
+    async (audience: FeedPostAudience) => {
+      if (!audiencePost) return;
+
+      const updatedPost = await setFeedPostAudience(
+        audiencePost.id,
+        audience,
+      );
+
+      updatePostInFeed(updatedPost);
+      setAudiencePost(null);
+    },
+    [audiencePost, updatePostInFeed],
+  );
+
+  const handleTogglePostPinned = useCallback(async () => {
+    if (!postMenuPost) return;
+
+    const updatedPost = await toggleFeedPostPinned(postMenuPost.id);
+    updatePostInFeed(updatedPost);
+  }, [postMenuPost, updatePostInFeed]);
+
+  const handleTogglePostNotifications = useCallback(async () => {
+    if (!postMenuPost) return;
+
+    const updatedPost = await toggleFeedPostNotifications(postMenuPost.id);
+    updatePostInFeed(updatedPost);
+  }, [postMenuPost, updatePostInFeed]);
+
+  const handleArchivePost = useCallback(async () => {
+    if (!postMenuPost) return;
+
+    const updatedPost = await archiveFeedPost(postMenuPost.id);
+    updatePostInFeed(updatedPost);
+  }, [postMenuPost, updatePostInFeed]);
+
+  const handleDeletePost = useCallback(() => {
+    if (!postMenuPost) return;
+
+    const postToDelete = postMenuPost;
+
+    Alert.alert(
+      "Delete post?",
+      "This permanently removes the post and its comments.",
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            await deleteFeedPost(postToDelete.id);
+
+            setPosts((current) =>
+              current.filter((post) => post.id !== postToDelete.id),
+            );
+
+            setPostMenuPost(null);
+          },
+        },
+      ],
+    );
+  }, [postMenuPost]);
+
   const openShareMenu = useCallback((post: FeedPost) => {
     setSharePost(post);
     setShareMenuVisible(true);
@@ -611,6 +1109,21 @@ export function FeedScreen({
     setShareMenuVisible(false);
     setSharePost(null);
   }, []);
+
+  const getPostLink = useCallback((post: FeedPost) => {
+    return `nexchat://feed/${encodeURIComponent(post.id)}`;
+  }, []);
+
+  const handleCopyPostLink = useCallback(async (post: FeedPost) => {
+    try {
+      const postLink = getPostLink(post);
+      await Clipboard.setStringAsync(postLink);
+      closeShareMenu();
+      Alert.alert("Link copied", "The NexChat post link is ready to share.");
+    } catch {
+      Alert.alert("Copy failed", "NexChat could not copy the post link.");
+    }
+  }, [closeShareMenu, getPostLink]);
 
   const handlePostShare = useCallback(async (post: FeedPost) => {
     setPublishing(true);
@@ -640,7 +1153,9 @@ export function FeedScreen({
       );
     } catch {
       // User cancelled the native share sheet or sharing failed.
-      }
+    } finally {
+      setPublishing(false);
+    }
   }, []);
 
   const handlePostDownload = useCallback(async (post: FeedPost) => {
@@ -649,67 +1164,148 @@ export function FeedScreen({
       post.attachments?.[0] ??
       post.music;
 
-    if (!attachment) {
-      Alert.alert(
-        "Nothing to download",
-        "This post does not contain downloadable media.",
-      );
-      return;
-    }
-
-    const kind =
-      attachment.kind ??
-      (attachment.mimeType?.startsWith("image/")
-        ? "image"
-        : attachment.mimeType?.startsWith("video/")
-          ? "video"
-          : attachment.mimeType?.startsWith("audio/")
-            ? "audio"
-            : "file");
-
-    if (kind !== "image" && kind !== "video") {
-      Alert.alert(
-        "Not supported yet",
-        "Image and video downloads are available now. Audio and document downloads will be added with the file-download system.",
-      );
-      return;
-    }
-
-    if (!attachment.uri) {
-      Alert.alert(
-        "Download failed",
-        "This media does not have a valid local file.",
-      );
-      return;
-    }
-
     setPublishing(true);
-    try {
-      const permission =
-        await MediaLibrary.requestPermissionsAsync();
 
-      if (!permission.granted) {
+    try {
+      /*
+       * Text-only posts are exported as a real .txt file.
+       */
+      if (!attachment) {
+        const cleanText = post.text.trim();
+
+        if (!cleanText) {
+          Alert.alert(
+            "Nothing to download",
+            "This post does not contain downloadable content.",
+          );
+          return;
+        }
+
+        const fileName =
+          `nexchat-post-${post.id.replace(/[^a-zA-Z0-9_-]/g, "_")}.txt`;
+
+        const destination =
+          `${FileSystem.cacheDirectory}${fileName}`;
+
+        const textContent = [
+          "NexChat Feed Post",
+          "",
+          `Author: ${post.creator.name}`,
+          post.creator.username
+            ? `Username: @${post.creator.username}`
+            : undefined,
+          `Created: ${post.createdAt}`,
+          "",
+          cleanText,
+          post.linkUrl?.trim()
+            ? `\nLink: ${post.linkUrl.trim()}`
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        await FileSystem.writeAsStringAsync(
+          destination,
+          textContent,
+        );
+
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(destination, {
+            mimeType: "text/plain",
+            dialogTitle: "Save NexChat post",
+            UTI: "public.plain-text",
+          });
+        } else {
+          Alert.alert(
+            "Text file created",
+            `The post was exported as ${fileName}.`,
+          );
+        }
+
+        return;
+      }
+
+      const kind =
+        attachment.kind ??
+        (attachment.mimeType?.startsWith("image/")
+          ? "image"
+          : attachment.mimeType?.startsWith("video/")
+            ? "video"
+            : attachment.mimeType?.startsWith("audio/")
+              ? "audio"
+              : "file");
+
+      if (!attachment.uri) {
         Alert.alert(
-          "Permission required",
-          "NexChat needs permission to save this media to your device.",
+          "Download failed",
+          "This attachment does not have a valid local file.",
         );
         return;
-    }
+      }
 
-      await MediaLibrary.saveToLibraryAsync(attachment.uri);
+      /*
+       * Photos and videos belong in the device media library.
+       */
+      if (kind === "image" || kind === "video") {
+        const permission =
+          await MediaLibrary.requestPermissionsAsync();
+
+        if (!permission.granted) {
+          Alert.alert(
+            "Permission required",
+            "NexChat needs permission to save this media to your device.",
+          );
+          return;
+        }
+
+        await MediaLibrary.saveToLibraryAsync(
+          attachment.uri,
+        );
+
+        Alert.alert(
+          "Downloaded",
+          `${attachment.name || (kind === "video" ? "Video" : "Image")} was saved to your device.`,
+        );
+
+        return;
+      }
+
+      /*
+       * Documents and audio files are exported through the
+       * native Android/iOS share/save sheet.
+       */
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(attachment.uri, {
+          mimeType:
+            attachment.mimeType ||
+            (kind === "audio"
+              ? "audio/*"
+              : "application/octet-stream"),
+          dialogTitle: `Save ${attachment.name || "NexChat file"}`,
+        });
+
+        return;
+      }
 
       Alert.alert(
-        "Downloaded",
-        `${attachment.name || (kind === "video" ? "Video" : "Image")} was saved to your device.`,
+        "Download unavailable",
+        "NexChat could not open the device save/share system for this file.",
       );
     } catch (error) {
-      console.error("Feed download failed:", error);
+      console.error(
+        "[NEXCHAT FEED] DOWNLOAD ERROR",
+        error,
+      );
 
       Alert.alert(
         "Download failed",
-        "NexChat could not save this media to your device.",
+        error instanceof Error
+          ? error.message
+          : "NexChat could not save this post.",
       );
-      }
+    } finally {
+      setPublishing(false);
+    }
   }, []);
 
   const openComments = useCallback(async (post: FeedPost) => {
@@ -717,7 +1313,6 @@ export function FeedScreen({
     setCommentText("");
     setCommentsLoading(true);
 
-    setPublishing(true);
     try {
       setComments(await getFeedComments(post.id));
     } finally {
@@ -775,12 +1370,21 @@ export function FeedScreen({
   ]);
 
   const refresh = useCallback(async () => {
+    console.log("[NEXCHAT FEED] refresh START");
     setLoading(true);
 
-    setPublishing(true);
     try {
-      setPosts(await loadFeedPosts());
+      console.log("[NEXCHAT FEED] calling loadFeedPosts");
+      const loadedPosts = await loadFeedPosts();
+      console.log(
+        "[NEXCHAT FEED] loadFeedPosts DONE",
+        loadedPosts.length,
+      );
+      setPosts(loadedPosts.filter((post) => !post.archived));
+    } catch (error) {
+      console.log("[NEXCHAT FEED] refresh ERROR", error);
     } finally {
+      console.log("[NEXCHAT FEED] refresh FINALLY - setting loading FALSE");
       setLoading(false);
     }
   }, []);
@@ -789,10 +1393,19 @@ export function FeedScreen({
     refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    console.log("[NEXCHAT FEED] loading STATE =", loading);
+  }, [loading]);
+
   const resetComposer = () => {
     setText("");
     setLinkUrl("");
     setAttachment(undefined);
+    setOverlayText("");
+    setOverlayX(0.5);
+    setOverlayY(0.5);
+    setOverlayEditorOpen(false);
+    setEditingPost(null);
   };
 
   const closeComposer = () => {
@@ -802,41 +1415,166 @@ export function FeedScreen({
     setComposerOpen(false);
   };
 
-  const pickFile = async () => {
+  const pickMedia = async (mediaType: "image" | "video") => {
     setPublishing(true);
+
     try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: "*/*",
-        copyToCacheDirectory: true,
-        multiple: false,
+      const permission =
+        await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+      if (!permission.granted) {
+        Alert.alert(
+          "Permission required",
+          "NexChat needs photo and video access to select media.",
+        );
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes:
+          mediaType === "image"
+            ? ["images"]
+            : ["videos"],
+        allowsMultipleSelection: false,
+        quality: 1,
       });
 
-      if (result.canceled || !result.assets?.[0]) return;
+      console.log(
+        `[NEXCHAT FEED] ${mediaType.toUpperCase()} PICKER RESULT`,
+        result,
+      );
+
+      if (result.canceled || !result.assets?.[0]) {
+        return;
+      }
 
       const asset = result.assets[0];
 
+      console.log("[NEXCHAT FEED] PICKED MEDIA", {
+        uri: asset.uri,
+        fileName: asset.fileName,
+        mimeType: asset.mimeType,
+        fileSize: asset.fileSize,
+        type: asset.type,
+      });
+
       setAttachment({
         uri: asset.uri,
-        name: asset.name,
-        mimeType: asset.mimeType,
-        size: asset.size,
+        name: asset.fileName ?? undefined,
+        mimeType: asset.mimeType ?? undefined,
+        size: asset.fileSize ?? undefined,
+        kind: mediaType,
+        durationMs:
+          asset.duration != null
+            ? Math.round(asset.duration * 1000)
+            : undefined,
+        overlayText: "",
+        overlayX: 0.5,
+        overlayY: 0.5,
       });
-    } catch {
-      // Composer remains usable if the picker is unavailable.
+
+      setOverlayText("");
+      setOverlayX(0.5);
+      setOverlayY(0.5);
+    } catch (error) {
+      console.log(
+        `[NEXCHAT FEED] ${mediaType.toUpperCase()} PICKER ERROR`,
+        error,
+      );
+      Alert.alert(
+        "Media picker error",
+        `NexChat could not open the ${mediaType === "image" ? "photo" : "video"} picker.`,
+      );
+    } finally {
+      setPublishing(false);
+    }
+  };
+
+  const beginEditPost = useCallback((post: FeedPost) => {
+    setPostMenuPost(null);
+    setEditingPost(post);
+    setText(post.text ?? "");
+    setLinkUrl(post.linkUrl ?? "");
+
+    const primaryAttachment =
+      post.attachment ??
+      post.attachments?.[0];
+
+    setAttachment(primaryAttachment);
+
+    setOverlayText(primaryAttachment?.overlayText ?? "");
+    setOverlayX(primaryAttachment?.overlayX ?? 0.5);
+    setOverlayY(primaryAttachment?.overlayY ?? 0.5);
+    setOverlayEditorOpen(false);
+    setComposerOpen(true);
+  }, []);
+
+  const saveEditedPost = async (type: FeedPostType) => {
+    if (!editingPost) return;
+
+    const cleanText = text.trim();
+
+    if (!cleanText && !attachment && !linkUrl.trim()) {
+      return;
+    }
+
+    const editedAttachment = attachment
+      ? {
+          ...attachment,
+          overlayText: overlayText.trim() || undefined,
+          overlayX,
+          overlayY,
+        }
+      : undefined;
+
+    setPublishing(true);
+
+    try {
+      const updatedPost = await updateFeedPost(
+        editingPost.id,
+        {
+          type,
+          text: cleanText,
+          linkUrl: linkUrl.trim(),
+          attachment: editedAttachment,
+          attachments: editedAttachment
+            ? [editedAttachment]
+            : [],
+        },
+      );
+
+      if (updatedPost) {
+        setPosts((current) =>
+          current.map((post) =>
+            post.id === updatedPost.id
+              ? updatedPost
+              : post,
+          ),
+        );
+      }
+
+      resetComposer();
+      setComposerOpen(false);
+    } finally {
+      setPublishing(false);
     }
   };
 
   const publish = async (type: FeedPostType) => {
     const cleanText = text.trim();
-    const cleanLink = linkUrl.trim();
 
-    if (
-      !cleanText &&
-      !attachment &&
-      !(type === "link" && cleanLink)
-    ) {
+    if (!cleanText && !attachment) {
       return;
     }
+
+    const publishAttachment = attachment
+      ? {
+          ...attachment,
+          overlayText: overlayText.trim() || undefined,
+          overlayX,
+          overlayY,
+        }
+      : undefined;
 
     setPublishing(true);
     try {
@@ -844,8 +1582,7 @@ export function FeedScreen({
         type,
         creator,
         text: cleanText,
-        linkUrl: type === "link" ? cleanLink : undefined,
-        attachment,
+        attachment: publishAttachment,
       });
 
       await refresh();
@@ -856,12 +1593,150 @@ export function FeedScreen({
     }
   };
 
-  const pauseFeedVideos = useCallback(() => {
-    if (activeFeedVideoPlayer) {
-      safelyPauseFeedVideo(activeFeedVideoPlayer);
-      activeFeedVideoPlayer = null;
-    }
+  const postHasVideo = useCallback((post: FeedPost) => {
+    const attachments =
+      post.attachments?.length
+        ? post.attachments
+        : post.attachment
+          ? [post.attachment]
+          : [];
+
+    return attachments.some(
+      (item) =>
+        item.kind === "video" ||
+        item.mimeType?.startsWith("video/"),
+    );
   }, []);
+
+  const updateActiveVideo = useCallback(() => {
+    const scrollY = feedScrollYRef.current;
+    const viewportHeight = feedViewportHeightRef.current;
+
+    if (!viewportHeight || !posts.length) return;
+
+    const visibilityByPost: Record<string, number> = {};
+
+    let bestId: string | null = null;
+    let bestVisibility = 0;
+
+    for (const post of posts) {
+      if (!postHasVideo(post)) continue;
+
+      const layout = postLayoutsRef.current[post.id];
+
+      if (!layout || layout.height <= 0) continue;
+
+      const top = layout.y - scrollY;
+      const bottom = top + layout.height;
+
+      const visibleHeight = Math.max(
+        0,
+        Math.min(bottom, viewportHeight) -
+          Math.max(top, 0),
+      );
+
+      const visibility = visibleHeight / layout.height;
+
+      visibilityByPost[post.id] = visibility;
+
+      if (visibility > bestVisibility) {
+        bestVisibility = visibility;
+        bestId = post.id;
+      }
+    }
+
+    setActiveVideoPostId((current) => {
+      if (!current) {
+        return bestVisibility >= 0.5 ? bestId : null;
+      }
+
+      const currentVisibility =
+        visibilityByPost[current] ?? 0;
+
+      /*
+       * Keep the current video active while it is still
+       * reasonably visible. This prevents rapid switching
+       * when the ScrollView/layout is settling.
+       */
+      if (currentVisibility >= 0.35) {
+        return current;
+      }
+
+      return bestVisibility >= 0.5 ? bestId : null;
+    });
+  }, [posts, postHasVideo]);
+
+  const handleFeedScroll = useCallback(
+    (event: any) => {
+      feedScrollYRef.current =
+        event.nativeEvent.contentOffset.y;
+
+      updateActiveVideo();
+    },
+    [updateActiveVideo],
+  );
+
+  const handleFeedViewportLayout = useCallback(
+    (event: any) => {
+      feedViewportHeightRef.current =
+        event.nativeEvent.layout.height;
+
+      updateActiveVideo();
+    },
+    [updateActiveVideo],
+  );
+
+  const handlePostLayout = useCallback(
+    (postId: string) => (event: any) => {
+      const { y, height } = event.nativeEvent.layout;
+
+      postLayoutsRef.current[postId] = {
+        y,
+        height,
+      };
+
+      updateActiveVideo();
+    },
+    [updateActiveVideo],
+  );
+
+  const handleVideoEnd = useCallback(
+    (postId: string): boolean => {
+      const currentIndex = posts.findIndex(
+        (post) => post.id === postId,
+      );
+
+      if (currentIndex === -1) {
+        return false;
+      }
+
+      const nextVideoIndex = posts.findIndex(
+        (post, index) =>
+          index > currentIndex &&
+          postHasVideo(post),
+      );
+
+      if (nextVideoIndex === -1) {
+        return false;
+      }
+
+      const nextPost = posts[nextVideoIndex];
+      const nextLayout =
+        postLayoutsRef.current[nextPost.id];
+
+      if (!nextLayout) {
+        return false;
+      }
+
+      feedScrollRef.current?.scrollTo({
+        y: Math.max(0, nextLayout.y),
+        animated: true,
+      });
+
+      return true;
+    },
+    [posts, postHasVideo],
+  );
 
   if (profileCreator) {
     return (
@@ -871,6 +1746,34 @@ export function FeedScreen({
         posts={posts}
         currentUserId={creator.id}
         onBack={() => setProfileCreator(null)}
+        renderPostMedia={(post) => {
+          const attachments =
+            post.attachments && post.attachments.length > 0
+              ? post.attachments
+              : post.attachment
+                ? [post.attachment]
+                : [];
+
+          if (attachments.length === 0) {
+            return null;
+          }
+
+          return (
+            <View style={styles.profilePostMedia}>
+              {attachments.length > 1 ? (
+                <FeedMediaCarousel
+                  attachments={attachments}
+                  theme={theme}
+                />
+              ) : (
+                <FeedMedia
+                  attachment={attachments[0]}
+                  theme={theme}
+                />
+              )}
+            </View>
+          );
+        }}
       />
     );
   }
@@ -893,14 +1796,6 @@ export function FeedScreen({
           </Text>
         </View>
 
-        <Pressable
-          onPress={() => setComposerOpen(true)}
-          accessibilityRole="button"
-          accessibilityLabel="Create post"
-          style={[styles.addButton, { backgroundColor: theme.brand }]}
-        >
-          <Text style={styles.addButtonText}>+</Text>
-        </Pressable>
       </View>
 
       {loading ? (
@@ -919,11 +1814,14 @@ export function FeedScreen({
           </Text>
 
           <Text style={[styles.emptyText, { color: theme.muted }]}>
-            Start the conversation. Share a thought, file, photo, or link.
+            Start the conversation. Share a thought, photo, video, or link.
           </Text>
 
           <Pressable
-            onPress={() => setComposerOpen(true)}
+            onPress={() => {
+              resetComposer();
+              setComposerOpen(true);
+            }}
             style={[styles.emptyButton, { backgroundColor: theme.brand }]}
 
           >
@@ -932,9 +1830,11 @@ export function FeedScreen({
         </View>
       ) : (
         <ScrollView
+          ref={feedScrollRef}
           contentContainerStyle={styles.feed}
-          onScrollBeginDrag={pauseFeedVideos}
-          onMomentumScrollBegin={pauseFeedVideos}
+          onLayout={handleFeedViewportLayout}
+          onScroll={handleFeedScroll}
+          scrollEventThrottle={16}
           showsVerticalScrollIndicator={false}
         >
           {posts.map((post) => (
@@ -947,10 +1847,433 @@ export function FeedScreen({
               onComments={openComments}
               onShare={openShareMenu}
               onProfile={handleOpenProfile}
+              onPostMenu={openPostMenu}
+              isActive={activeVideoPostId === post.id}
+              onVideoEnd={() => handleVideoEnd(post.id)}
+              onLayout={handlePostLayout(post.id)}
             />
           ))}
         </ScrollView>
       )}
+
+      <Modal
+        visible={!!postMenuPost}
+        animationType="fade"
+        transparent
+        onRequestClose={closePostMenu}
+      >
+        <Pressable
+          style={styles.postMenuBackdrop}
+          onPress={closePostMenu}
+        >
+          <Pressable
+            style={[
+              styles.postMenuCard,
+              { backgroundColor: theme.card },
+            ]}
+            onPress={(event) => event.stopPropagation()}
+          >
+            <View style={styles.postMenuHandle} />
+
+            <Text
+              style={[
+                styles.postMenuTitle,
+                { color: theme.ink },
+              ]}
+            >
+              {postMenuPost?.creator.id === creator.id
+                ? "Manage post"
+                : "Post options"}
+            </Text>
+
+            {postMenuPost?.creator.id === creator.id ? (
+              <>
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={() => {
+                    if (postMenuPost) {
+                      beginEditPost(postMenuPost);
+                    }
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    Edit post
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={handleTogglePostPinned}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    {postMenuPost?.pinned
+                      ? "Unpin post"
+                      : "Pin post"}
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={handleTogglePostNotifications}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    {postMenuPost?.notificationsEnabled
+                      ? "Turn off post notifications"
+                      : "Turn on post notifications"}
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={openAudienceSelector}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    Audience
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={handleArchivePost}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    Archive post
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={handleDeletePost}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemTextDanger,
+                    ]}
+                  >
+                    Delete post
+                  </Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={() => {
+                    closePostMenu();
+                    Alert.alert(
+                      "Save for later",
+                      "Post saving will be connected to your saved posts library.",
+                    );
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    Save for later
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={() => {
+                    closePostMenu();
+                    Alert.alert(
+                      "Not interested",
+                      "We'll use this preference to improve your feed.",
+                    );
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    Not interested
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={() => {
+                    closePostMenu();
+                    Alert.alert(
+                      "Mute creator",
+                      `Posts from ${postMenuPost?.creator.name ?? "this creator"} can be muted from your feed preferences.`,
+                    );
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    Mute creator
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={handleTogglePostNotifications}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    {postMenuPost?.notificationsEnabled
+                      ? "Turn off post notifications"
+                      : "Turn on post notifications"}
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={() => {
+                    closePostMenu();
+                    Alert.alert(
+                      "Report post",
+                      "Report handling will be connected to the NexChat moderation system.",
+                    );
+                  }}
+                >
+                  <Text
+                    style={styles.postMenuItemTextDanger}
+                  >
+                    Report post
+                  </Text>
+                </Pressable>
+              </>
+            )}
+
+            <Pressable
+              style={styles.postMenuCancel}
+              onPress={closePostMenu}
+            >
+              <Text
+                style={[
+                  styles.postMenuCancelText,
+                  { color: theme.muted },
+                ]}
+              >
+                Cancel
+              </Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
+        visible={!!audiencePost}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setAudiencePost(null)}
+      >
+        <Pressable
+          style={styles.postMenuBackdrop}
+          onPress={() => setAudiencePost(null)}
+        >
+          <Pressable
+            style={[
+              styles.postMenuCard,
+              { backgroundColor: theme.card },
+            ]}
+            onPress={(event) => event.stopPropagation()}
+          >
+            <View style={styles.postMenuHandle} />
+
+            <Text
+              style={[
+                styles.postMenuTitle,
+                { color: theme.ink },
+              ]}
+            >
+              Post audience
+            </Text>
+
+            <Text
+              style={[
+                styles.audienceSubtitle,
+                { color: theme.muted },
+              ]}
+            >
+              Choose who can see this post.
+            </Text>
+
+            <Pressable
+              style={styles.postMenuItem}
+              onPress={() => handleSetPostAudience("everyone")}
+            >
+              <View style={styles.audienceOptionRow}>
+                <View style={styles.audienceOptionText}>
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    Everyone
+                  </Text>
+                  <Text
+                    style={[
+                      styles.audienceOptionDescription,
+                      { color: theme.muted },
+                    ]}
+                  >
+                    Anyone who can access your feed
+                  </Text>
+                </View>
+
+                {(audiencePost?.audience ?? "everyone") === "everyone" ? (
+                  <Text style={[styles.audienceCheck, { color: theme.brand }]}>
+                    ✓
+                  </Text>
+                ) : null}
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={styles.postMenuItem}
+              onPress={() => handleSetPostAudience("my_university")}
+            >
+              <View style={styles.audienceOptionRow}>
+                <View style={styles.audienceOptionText}>
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    My university
+                  </Text>
+                  <Text
+                    style={[
+                      styles.audienceOptionDescription,
+                      { color: theme.muted },
+                    ]}
+                  >
+                    People from your university
+                  </Text>
+                </View>
+
+                {audiencePost?.audience === "my_university" ? (
+                  <Text style={[styles.audienceCheck, { color: theme.brand }]}>
+                    ✓
+                  </Text>
+                ) : null}
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={styles.postMenuItem}
+              onPress={() => handleSetPostAudience("connections")}
+            >
+              <View style={styles.audienceOptionRow}>
+                <View style={styles.audienceOptionText}>
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    Connections
+                  </Text>
+                  <Text
+                    style={[
+                      styles.audienceOptionDescription,
+                      { color: theme.muted },
+                    ]}
+                  >
+                    People you are connected with
+                  </Text>
+                </View>
+
+                {audiencePost?.audience === "connections" ? (
+                  <Text style={[styles.audienceCheck, { color: theme.brand }]}>
+                    ✓
+                  </Text>
+                ) : null}
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={styles.postMenuItem}
+              onPress={() => handleSetPostAudience("only_me")}
+            >
+              <View style={styles.audienceOptionRow}>
+                <View style={styles.audienceOptionText}>
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    Only me
+                  </Text>
+                  <Text
+                    style={[
+                      styles.audienceOptionDescription,
+                      { color: theme.muted },
+                    ]}
+                  >
+                    Only you can see this post
+                  </Text>
+                </View>
+
+                {audiencePost?.audience === "only_me" ? (
+                  <Text style={[styles.audienceCheck, { color: theme.brand }]}>
+                    ✓
+                  </Text>
+                ) : null}
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={styles.postMenuCancel}
+              onPress={() => setAudiencePost(null)}
+            >
+              <Text
+                style={[
+                  styles.postMenuCancelText,
+                  { color: theme.muted },
+                ]}
+              >
+                Cancel
+              </Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <Modal
         visible={!!activeCommentPost}
@@ -965,19 +2288,30 @@ export function FeedScreen({
               { backgroundColor: theme.card },
             ]}
           >
+            <View style={styles.commentsHandle} />
+
             <View style={styles.commentsHeader}>
-              <View>
+              <View style={styles.commentsHeaderText}>
                 <Text style={[styles.commentsTitle, { color: theme.ink }]}>
                   Comments
                 </Text>
                 <Text style={[styles.commentsSubtitle, { color: theme.muted }]}>
-                  {activeCommentPost?.commentCount ?? comments.length} comments
+                  {(activeCommentPost?.commentCount ?? comments.length) === 1
+                    ? "1 comment"
+                    : `${activeCommentPost?.commentCount ?? comments.length} comments`}
                 </Text>
               </View>
 
               <Pressable
                 onPress={() => setActiveCommentPost(null)}
-                style={styles.commentsCloseButton}
+                style={({ pressed }) => [
+                  styles.commentsCloseButton,
+                  {
+                    backgroundColor: pressed ? theme.bg : "transparent",
+                  },
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Close comments"
               >
                 <Text style={[styles.commentsCloseText, { color: theme.ink }]}>
                   ×
@@ -994,9 +2328,19 @@ export function FeedScreen({
                 style={styles.commentsList}
                 contentContainerStyle={styles.commentsListContent}
                 keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
               >
                 {comments.length === 0 ? (
                   <View style={styles.emptyComments}>
+                    <View
+                      style={[
+                        styles.emptyCommentsIcon,
+                        { backgroundColor: theme.bg },
+                      ]}
+                    >
+                      <Text style={styles.emptyCommentsIconText}>💬</Text>
+                    </View>
+
                     <Text
                       style={[
                         styles.emptyCommentsTitle,
@@ -1012,7 +2356,7 @@ export function FeedScreen({
                         { color: theme.muted },
                       ]}
                     >
-                      Be the first to comment on this post.
+                      Start the conversation by leaving the first comment.
                     </Text>
                   </View>
                 ) : (
@@ -1021,15 +2365,10 @@ export function FeedScreen({
                       <View
                         style={[
                           styles.commentAvatar,
-                          { backgroundColor: theme.bg },
+                          { backgroundColor: theme.brand },
                         ]}
                       >
-                        <Text
-                          style={[
-                            styles.commentAvatarText,
-                            { color: theme.ink },
-                          ]}
-                        >
+                        <Text style={styles.commentAvatarText}>
                           {(comment.author.name || "?")
                             .trim()
                             .charAt(0)
@@ -1043,25 +2382,40 @@ export function FeedScreen({
                           { backgroundColor: theme.bg },
                         ]}
                       >
-                        <Text
-                          style={[
-                            styles.commentAuthor,
-                            { color: theme.ink },
-                          ]}
-                        >
-                          {comment.author.name}
-                        </Text>
+                        <View style={styles.commentAuthorRow}>
+                          <View style={styles.commentAuthorInfo}>
+                            <Text
+                              style={[
+                                styles.commentAuthor,
+                                { color: theme.ink },
+                              ]}
+                              numberOfLines={1}
+                            >
+                              {comment.author.name}
+                            </Text>
 
-                        {comment.author.username ? (
+                            {comment.author.username ? (
+                              <Text
+                                style={[
+                                  styles.commentUsername,
+                                  { color: theme.muted },
+                                ]}
+                                numberOfLines={1}
+                              >
+                                @{comment.author.username}
+                              </Text>
+                            ) : null}
+                          </View>
+
                           <Text
                             style={[
-                              styles.commentUsername,
+                              styles.commentTimestamp,
                               { color: theme.muted },
                             ]}
                           >
-                            @{comment.author.username}
+                            {new Date(comment.createdAt).toLocaleString()}
                           </Text>
-                        ) : null}
+                        </View>
 
                         <Text
                           style={[
@@ -1084,51 +2438,71 @@ export function FeedScreen({
                 { borderTopColor: theme.line },
               ]}
             >
-              <TextInput
-                value={commentText}
-                onChangeText={setCommentText}
-                placeholder="Write a comment..."
-                placeholderTextColor={theme.muted}
-                editable={!commentSubmitting}
-                multiline
-                maxLength={1000}
+              <View
                 style={[
-                  styles.commentInput,
+                  styles.commentInputWrap,
                   {
-                    color: theme.ink,
                     backgroundColor: theme.bg,
                     borderColor: theme.line,
                   },
                 ]}
-              />
+              >
+                <TextInput
+                  value={commentText}
+                  onChangeText={setCommentText}
+                  placeholder="Write a comment..."
+                  placeholderTextColor={theme.muted}
+                  editable={!commentSubmitting}
+                  multiline
+                  maxLength={1000}
+                  style={[
+                    styles.commentInput,
+                    { color: theme.ink },
+                  ]}
+                />
+              </View>
 
               <Pressable
                 onPress={submitComment}
-                disabled={
-                  commentSubmitting || !commentText.trim()
-    }
-                style={[
+                disabled={commentSubmitting || !commentText.trim()}
+                style={({ pressed }) => [
                   styles.commentSendButton,
                   {
                     backgroundColor:
                       commentSubmitting || !commentText.trim()
                         ? theme.line
                         : theme.brand,
+                    opacity: pressed ? 0.8 : 1,
                   },
                 ]}
+                accessibilityRole="button"
+                accessibilityLabel="Send comment"
               >
                 {commentSubmitting ? (
                   <ActivityIndicator color="#fff" size="small" />
                 ) : (
-                  <Text style={styles.commentSendText}>
-                    Send
-                  </Text>
+                  <Text style={styles.commentSendText}>↑</Text>
                 )}
               </Pressable>
             </View>
           </View>
         </View>
       </Modal>
+
+      <Pressable
+        onPress={() => {
+          resetComposer();
+          setComposerOpen(true);
+        }}
+        accessibilityRole="button"
+        accessibilityLabel="Create post"
+        style={[
+          styles.floatingAddButton,
+          { backgroundColor: theme.brand },
+        ]}
+      >
+        <Text style={styles.addButtonText}>+</Text>
+      </Pressable>
 
       <Modal
         visible={composerOpen}
@@ -1137,19 +2511,26 @@ export function FeedScreen({
         onRequestClose={closeComposer}
       >
         <View style={styles.modalBackdrop}>
-          <View
-            style={[
-              styles.composer,
-              { backgroundColor: theme.card },
-            ]}
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+            keyboardVerticalOffset={0}
+            style={styles.composerKeyboard}
           >
+            <View
+              style={[
+                styles.composer,
+                { backgroundColor: theme.card },
+              ]}
+            >
             <View style={styles.composerHeader}>
               <View>
                 <Text style={[styles.composerTitle, { color: theme.ink }]}>
-                  Create post
+                  {editingPost ? "Edit post" : "Create post"}
                 </Text>
                 <Text style={[styles.composerSubtitle, { color: theme.muted }]}>
-                  Share something with your feed
+                  {editingPost
+                    ? "Update your post"
+                    : "Share something with your feed"}
                 </Text>
               </View>
 
@@ -1192,64 +2573,101 @@ export function FeedScreen({
                 </View>
               </View>
 
-              <TextInput
-                value={text}
-                onChangeText={setText}
-                placeholder="What do you want to share?"
-                placeholderTextColor={theme.muted}
-                multiline
-                textAlignVertical="top"
-                style={[
-                  styles.textInput,
-                  {
-                    color: theme.ink,
-                    borderColor: theme.line,
-                    backgroundColor: theme.bg,
-                  },
-                ]}
-              />
+              <View style={styles.createPostEditor}>
+                {attachment ? (
+                  <View
+                    style={[
+                      styles.mediaEditorPreview,
+                      { backgroundColor: theme.bg, borderColor: theme.line },
+                    ]}
+                  >
+                    {attachment.kind === "image" ? (
+                      <Image
+                        source={{ uri: attachment.uri }}
+                        style={styles.mediaEditorImage}
+                        resizeMode="cover"
+                      />
+                    ) : (
+                      <View style={styles.mediaEditorVideoPlaceholder}>
+                        <Text style={styles.mediaEditorVideoIcon}>🎥</Text>
+                        <Text
+                          style={[
+                            styles.mediaEditorVideoText,
+                            { color: theme.ink },
+                          ]}
+                        >
+                          Video selected
+                        </Text>
+                      </View>
+                    )}
 
-              <TextInput
-                value={linkUrl}
-                onChangeText={setLinkUrl}
-                placeholder="Paste a link (optional)"
-                placeholderTextColor={theme.muted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="url"
-                style={[
-                  styles.linkInput,
-                  {
-                    color: theme.ink,
-                    borderColor: theme.line,
-                    backgroundColor: theme.bg,
-                  },
-                ]}
-              />
+                    {overlayText.trim() ? (
+                      <View
+                        {...overlayPanResponder.panHandlers}
+                        style={[
+                          styles.mediaOverlayPreview,
+                          {
+                            left: `${overlayX * 100}%`,
+                            top: `${overlayY * 100}%`,
+                          },
+                        ]}
+                      >
+                        <Text style={styles.mediaOverlayText}>
+                          {overlayText}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
+                ) : null}
 
-              {attachment && (
-                <View
+                <Text
                   style={[
-                    styles.selectedAttachment,
+                    styles.createPostCaption,
+                    { color: theme.muted },
+                  ]}
+                >
+                  Caption
+                </Text>
+
+                <TextInput
+                  value={text}
+                  onChangeText={setText}
+                  placeholder="What's on your mind?"
+                  placeholderTextColor={theme.muted}
+                  multiline
+                  textAlignVertical="top"
+                  style={[
+                    styles.textInput,
                     {
+                      color: theme.ink,
                       borderColor: theme.line,
                       backgroundColor: theme.bg,
                     },
                   ]}
-                >
-                  <Text style={[styles.selectedName, { color: theme.ink }]}>
-                    📎 {attachment.name || "Selected file"}
-                  </Text>
-
-                  <Pressable onPress={() => setAttachment(undefined)}>
-                    <Text style={{ color: theme.brand }}>Remove</Text>
-                  </Pressable>
-                </View>
-              )}
+                />
+              </View>
 
               <View style={styles.composerTools}>
+                {attachment ? (
+                  <Pressable
+                    onPress={() => setOverlayEditorOpen(true)}
+                    disabled={publishing}
+                    style={[
+                      styles.toolButton,
+                      {
+                        borderColor: theme.line,
+                        backgroundColor: theme.bg,
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.toolText, { color: theme.ink }]}>
+                      📝 Add text
+                    </Text>
+                  </Pressable>
+                ) : null}
                 <Pressable
-                  onPress={pickFile}
+                  onPress={() => void pickMedia("image")}
+                  disabled={publishing}
                   style={[
                     styles.toolButton,
                     {
@@ -1259,12 +2677,13 @@ export function FeedScreen({
                   ]}
                 >
                   <Text style={[styles.toolText, { color: theme.ink }]}>
-                    ＋ File
+                    🖼️ Photo
                   </Text>
                 </Pressable>
 
                 <Pressable
-                  onPress={() => setLinkUrl(linkUrl || "https://")}
+                  onPress={() => void pickMedia("video")}
+                  disabled={publishing}
                   style={[
                     styles.toolButton,
                     {
@@ -1274,7 +2693,7 @@ export function FeedScreen({
                   ]}
                 >
                   <Text style={[styles.toolText, { color: theme.ink }]}>
-                    🔗 Link
+                    🎥 Video
                   </Text>
                 </Pressable>
               </View>
@@ -1294,29 +2713,31 @@ export function FeedScreen({
                 </Pressable>
 
                 <Pressable
-                  onPress={() =>
-                    publish(
-                      attachment
-                        ? "file"
-                        : linkUrl.trim()
-                          ? "link"
-                          : "text",
-                    )
-                }
+                  onPress={() => {
+                    const attachmentKind = attachment?.kind;
+
+                    const postType: FeedPostType =
+                      attachmentKind === "image" ||
+                      attachmentKind === "video"
+                        ? "media"
+                        : "text";
+
+                    if (editingPost) {
+                      void saveEditedPost(postType);
+                    } else {
+                      void publish(postType);
+                    }
+                  }}
                   disabled={
                     publishing ||
-                    (!text.trim() &&
-                      !attachment &&
-                      !linkUrl.trim())
+                    (!text.trim() && !attachment)
                   }
                   style={[
                     styles.publishButton,
                     {
                       backgroundColor:
                         publishing ||
-                        (!text.trim() &&
-                          !attachment &&
-                          !linkUrl.trim())
+                        (!text.trim() && !attachment)
                           ? theme.muted
                           : theme.brand,
                     },
@@ -1325,12 +2746,116 @@ export function FeedScreen({
                   {publishing ? (
                     <ActivityIndicator color="#fff" />
                   ) : (
-                    <Text style={styles.publishText}>Post</Text>
+                    <Text style={styles.publishText}>
+                      {editingPost ? "Save changes" : "Post"}
+                    </Text>
                   )}
                 </Pressable>
               </View>
-            </ScrollView>
-          </View>
+
+              {overlayEditorOpen ? (
+                <View style={styles.overlayEditorBackdrop}>
+                  <View
+                    style={[
+                      styles.overlayEditorCard,
+                      {
+                        backgroundColor: theme.card,
+                        borderColor: theme.line,
+                      },
+                    ]}
+                  >
+                    <View style={styles.overlayEditorHeader}>
+                      <Text
+                        style={[
+                          styles.overlayEditorTitle,
+                          { color: theme.ink },
+                        ]}
+                      >
+                        Add text
+                      </Text>
+
+                      <Pressable
+                        onPress={() => setOverlayEditorOpen(false)}
+                      >
+                        <Text
+                          style={[
+                            styles.closeText,
+                            { color: theme.ink },
+                          ]}
+                        >
+                          ×
+                        </Text>
+                      </Pressable>
+                    </View>
+
+                    <TextInput
+                      value={overlayText}
+                      onChangeText={setOverlayText}
+                      placeholder="Type text to place on your media"
+                      placeholderTextColor={theme.muted}
+                      multiline
+                      autoFocus
+                      style={[
+                        styles.overlayEditorInput,
+                        {
+                          color: theme.ink,
+                          borderColor: theme.line,
+                          backgroundColor: theme.bg,
+                        },
+                      ]}
+                    />
+
+                    <View style={styles.overlayEditorActions}>
+                      <Pressable
+                        onPress={() => {
+                          setOverlayText("");
+                          setOverlayEditorOpen(false);
+                        }}
+                        style={[
+                          styles.cancelButton,
+                          { borderColor: theme.line },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.cancelText,
+                            { color: theme.ink },
+                          ]}
+                        >
+                          Cancel
+                        </Text>
+                      </Pressable>
+
+                      <Pressable
+                        onPress={() => {
+                          setAttachment((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  overlayText: overlayText.trim(),
+                                  overlayX,
+                                  overlayY,
+                                }
+                              : current,
+                          );
+                          setOverlayText(overlayText.trim());
+                          setOverlayEditorOpen(false);
+                        }}
+                        style={[
+                          styles.publishButton,
+                          { backgroundColor: theme.brand },
+                        ]}
+                      >
+                        <Text style={styles.publishText}>Done</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                </View>
+              ) : null}
+
+              </ScrollView>
+            </View>
+          </KeyboardAvoidingView>
         </View>
       </Modal>
 
@@ -1367,6 +2892,25 @@ export function FeedScreen({
                 </Text>
               </Pressable>
             </View>
+
+            <Pressable
+              style={[styles.shareOption, { borderColor: theme.line }]}
+              onPress={() => {
+                if (sharePost) {
+                  void handleCopyPostLink(sharePost);
+                }
+              }}
+            >
+              <Text style={styles.shareOptionIcon}>🔗</Text>
+              <View style={styles.shareOptionText}>
+                <Text style={[styles.shareOptionTitle, { color: theme.ink }]}>
+                  Copy link
+                </Text>
+                <Text style={[styles.shareOptionSubtitle, { color: theme.muted }]}>
+                  Copy this post's NexChat link
+                </Text>
+              </View>
+            </Pressable>
 
             <Pressable
               style={[styles.shareOption, { borderColor: theme.line }]}
@@ -1518,12 +3062,16 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  addButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+  floatingAddButton: {
+    position: "absolute",
+    right: 18,
+    bottom: 24,
+    width: 58,
+    height: 58,
+    borderRadius: 29,
     alignItems: "center",
     justifyContent: "center",
+    elevation: 8,
   },
 
   addButtonText: {
@@ -1587,6 +3135,97 @@ const styles = StyleSheet.create({
   postMeta: {
     fontSize: 12,
     marginTop: 3,
+  },
+
+  postMenuBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.55)",
+    justifyContent: "flex-end",
+    padding: 14,
+  },
+
+  postMenuCard: {
+    borderRadius: 20,
+    paddingTop: 10,
+    paddingBottom: 8,
+    overflow: "hidden",
+  },
+
+  postMenuHandle: {
+    alignSelf: "center",
+    width: 42,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(128, 128, 128, 0.45)",
+    marginBottom: 8,
+  },
+
+  postMenuTitle: {
+    fontSize: 17,
+    fontWeight: "800",
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+  },
+
+  audienceSubtitle: {
+    fontSize: 13,
+    lineHeight: 18,
+    paddingHorizontal: 18,
+    paddingBottom: 8,
+  },
+
+  audienceOptionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    minHeight: 50,
+  },
+
+  audienceOptionText: {
+    flex: 1,
+    paddingRight: 12,
+  },
+
+  audienceOptionDescription: {
+    fontSize: 12,
+    lineHeight: 16,
+    marginTop: 3,
+  },
+
+  audienceCheck: {
+    fontSize: 20,
+    fontWeight: "800",
+  },
+
+  postMenuItem: {
+    minHeight: 50,
+    justifyContent: "center",
+    paddingHorizontal: 18,
+  },
+
+  postMenuItemText: {
+    fontSize: 15,
+    fontWeight: "600",
+  },
+
+  postMenuItemTextDanger: {
+    color: "#D92D20",
+    fontSize: 15,
+    fontWeight: "700",
+  },
+
+  postMenuCancel: {
+    marginTop: 6,
+    minHeight: 50,
+    justifyContent: "center",
+    alignItems: "center",
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "rgba(128, 128, 128, 0.25)",
+  },
+
+  postMenuCancelText: {
+    fontSize: 15,
+    fontWeight: "700",
   },
 
   moreButton: {
@@ -1675,25 +3314,33 @@ const styles = StyleSheet.create({
     width: "100%",
     height: 260,
     position: "relative",
+    overflow: "hidden",
   },
 
-  feedVideoPlayButton: {
+  feedVideoPausedOverlay: {
     position: "absolute",
-    left: "50%",
-    top: "50%",
-    width: 58,
-    height: 58,
-    marginLeft: -29,
-    marginTop: -29,
-    borderRadius: 29,
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0, 0, 0, 0.24)",
+  },
+
+  feedVideoPlayOverlay: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
     alignItems: "center",
     justifyContent: "center",
   },
 
-  feedVideoPlayText: {
+  feedVideoPlayOverlayText: {
     color: "#FFFFFF",
-    fontSize: 22,
-    fontWeight: "800",
+    fontSize: 25,
+    fontWeight: "900",
+    marginLeft: 3,
   },
 
   mediaCaption: {
@@ -1733,6 +3380,30 @@ const styles = StyleSheet.create({
 
   mediaWrapper: {
     marginTop: 12,
+  },
+
+  profilePostMedia: {
+    marginTop: 12,
+  },
+
+  carouselPage: {
+    width: "100%",
+  },
+
+  carouselIndicator: {
+    position: "absolute",
+    right: 10,
+    top: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: "rgba(0, 0, 0, 0.65)",
+  },
+
+  carouselIndicatorText: {
+    color: "#FFFFFF",
+    fontSize: 11,
+    fontWeight: "700",
   },
 
   musicWrapper: {
@@ -1813,6 +3484,16 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
 
+  commentsHandle: {
+    alignSelf: "center",
+    width: 38,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(128,128,128,0.45)",
+    marginTop: 2,
+    marginBottom: 4,
+  },
+
   commentsHeader: {
     minHeight: 64,
     paddingHorizontal: 18,
@@ -1826,6 +3507,11 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: "800",
   },
+
+  commentsHeaderText: {
+    flex: 1,
+  },
+
 
   commentsSubtitle: {
     marginTop: 2,
@@ -1868,6 +3554,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: 30,
   },
 
+  emptyCommentsIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 14,
+  },
+
+  emptyCommentsIconText: {
+    fontSize: 23,
+  },
+
+
   emptyCommentsTitle: {
     fontSize: 16,
     fontWeight: "800",
@@ -1884,6 +3584,20 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
     marginBottom: 12,
   },
+
+  commentAuthorRow: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+
+  commentAuthorInfo: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingRight: 8,
+  },
+
 
   commentAvatar: {
     width: 36,
@@ -1916,6 +3630,12 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
 
+  commentTimestamp: {
+    flexShrink: 0,
+    fontSize: 10,
+  },
+
+
   commentBody: {
     fontSize: 14,
     lineHeight: 20,
@@ -1931,30 +3651,36 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
   },
 
-  commentInput: {
+  commentInputWrap: {
     flex: 1,
     minHeight: 44,
     maxHeight: 100,
     borderWidth: 1,
     borderRadius: 18,
+    marginRight: 8,
+    overflow: "hidden",
+  },
+
+  commentInput: {
+    minHeight: 42,
+    maxHeight: 98,
     paddingHorizontal: 14,
     paddingVertical: 10,
     fontSize: 14,
-    marginRight: 8,
   },
 
   commentSendButton: {
-    minWidth: 62,
+    width: 44,
     height: 44,
     borderRadius: 22,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 14,
   },
 
   commentSendText: {
     color: "#fff",
-    fontSize: 13,
+    fontSize: 22,
+    lineHeight: 24,
     fontWeight: "800",
   },
 
@@ -2025,11 +3751,22 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
 
+  composerKeyboard: {
+    width: "100%",
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 14,
+    paddingVertical: 24,
+  },
+
   composer: {
-    maxHeight: "92%",
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 18,
+    width: "100%",
+    maxWidth: 520,
+    maxHeight: "86%",
+    borderRadius: 26,
+    padding: 20,
+    overflow: "hidden",
   },
 
   composerHeader: {
@@ -2069,23 +3806,86 @@ const styles = StyleSheet.create({
     marginRight: 10,
   },
 
-  textInput: {
-    minHeight: 150,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 15,
-    padding: 14,
-    fontSize: 16,
-    lineHeight: 23,
+  createPostEditor: {
+    minHeight: 270,
+    justifyContent: "center",
+    marginTop: 10,
   },
 
-  linkInput: {
-    minHeight: 48,
-    marginTop: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 12,
-    paddingHorizontal: 13,
-    fontSize: 14,
+  createPostCaption: {
+    textAlign: "center",
+    fontSize: 13,
+    fontWeight: "800",
+    marginBottom: 10,
+    letterSpacing: 0.3,
   },
+
+  feedMediaOverlayContainer: {
+    width: "100%",
+    position: "relative",
+    overflow: "hidden",
+  },
+
+  mediaEditorPreview: {
+    width: "100%",
+    height: 240,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: "hidden",
+    position: "relative",
+    marginBottom: 14,
+  },
+
+  mediaEditorImage: {
+    width: "100%",
+    height: "100%",
+  },
+
+  mediaEditorVideoPlaceholder: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  mediaEditorVideoIcon: {
+    fontSize: 38,
+    marginBottom: 8,
+  },
+
+  mediaEditorVideoText: {
+    fontSize: 14,
+    fontWeight: "800",
+  },
+
+  mediaOverlayPreview: {
+    position: "absolute",
+    transform: [{ translateX: -50 }, { translateY: -18 }],
+    maxWidth: "88%",
+  },
+
+  mediaOverlayText: {
+    color: "#FFFFFF",
+    fontSize: 22,
+    fontWeight: "900",
+    textAlign: "center",
+    textShadowColor: "rgba(0,0,0,0.8)",
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 4,
+  },
+
+  textInput: {
+    minHeight: 230,
+    maxHeight: 300,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 18,
+    paddingHorizontal: 18,
+    paddingVertical: 18,
+    fontSize: 17,
+    lineHeight: 25,
+  },
+
+
+
 
   selectedAttachment: {
     marginTop: 10,
@@ -2106,8 +3906,9 @@ const styles = StyleSheet.create({
 
   composerTools: {
     flexDirection: "row",
-    gap: 8,
-    marginTop: 12,
+    justifyContent: "center",
+    gap: 10,
+    marginTop: 18,
   },
 
   toolButton: {
@@ -2125,7 +3926,7 @@ const styles = StyleSheet.create({
   publishRow: {
     flexDirection: "row",
     gap: 10,
-    marginTop: 20,
+    marginTop: 22,
     marginBottom: 8,
   },
 
@@ -2154,5 +3955,57 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontWeight: "900",
     fontSize: 15,
+  },
+
+  overlayEditorBackdrop: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.45)",
+    padding: 20,
+    zIndex: 20,
+  },
+
+  overlayEditorCard: {
+    width: "100%",
+    maxWidth: 440,
+    borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: 18,
+    elevation: 10,
+  },
+
+  overlayEditorHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 12,
+  },
+
+  overlayEditorTitle: {
+    fontSize: 18,
+    fontWeight: "900",
+  },
+
+  overlayEditorInput: {
+    minHeight: 110,
+    maxHeight: 180,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    fontSize: 16,
+    lineHeight: 23,
+    textAlignVertical: "top",
+  },
+
+  overlayEditorActions: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 14,
   },
 });

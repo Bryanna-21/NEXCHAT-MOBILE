@@ -2,6 +2,12 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export type FeedPostType = "text" | "media" | "file" | "link";
 
+export type FeedPostAudience =
+  | "everyone"
+  | "my_university"
+  | "connections"
+  | "only_me";
+
 export type FeedMediaKind = "image" | "video" | "audio" | "file";
 
 export type FeedCreator = {
@@ -18,6 +24,9 @@ export type FeedAttachment = {
   size?: number;
   kind?: FeedMediaKind;
   durationMs?: number;
+  overlayText?: string;
+  overlayX?: number;
+  overlayY?: number;
 };
 
 export type FeedComment = {
@@ -67,6 +76,14 @@ export type FeedPost = {
    */
   commentCount?: number;
 
+  /**
+   * Post management state.
+   */
+  pinned?: boolean;
+  notificationsEnabled?: boolean;
+  archived?: boolean;
+  audience?: FeedPostAudience;
+
   createdAt: string;
   updatedAt?: string;
 };
@@ -98,6 +115,15 @@ function normalizeAttachment(
             ? "audio"
             : "file"),
     durationMs: attachment.durationMs,
+    overlayText: attachment.overlayText?.trim() || undefined,
+    overlayX:
+      typeof attachment.overlayX === "number"
+        ? Math.max(0.08, Math.min(0.92, attachment.overlayX))
+        : undefined,
+    overlayY:
+      typeof attachment.overlayY === "number"
+        ? Math.max(0.08, Math.min(0.92, attachment.overlayY))
+        : undefined,
   };
 }
 
@@ -237,6 +263,7 @@ export async function createFeedPost(input: {
     attachment: allAttachments[0],
     attachments: allAttachments,
     music: normalizeAttachment(input.music),
+    audience: "everyone",
     likedBy: [],
     shareCount: 0,
     commentCount: 0,
@@ -316,6 +343,94 @@ export async function deleteFeedPost(id: string): Promise<void> {
   await saveComments(
     comments.filter((comment) => comment.postId !== id),
   );
+}
+
+export async function toggleFeedPostPinned(
+  postId: string,
+): Promise<FeedPost | null> {
+  const posts = await loadFeedPosts();
+  const index = posts.findIndex((post) => post.id === postId);
+
+  if (index === -1) return null;
+
+  const updatedPost: FeedPost = {
+    ...posts[index],
+    pinned: !posts[index].pinned,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const updated = [...posts];
+  updated[index] = updatedPost;
+
+  await saveFeedPosts(updated);
+
+  return updatedPost;
+}
+
+export async function setFeedPostAudience(
+  postId: string,
+  audience: FeedPostAudience,
+): Promise<FeedPost | null> {
+  const posts = await loadFeedPosts();
+  const index = posts.findIndex((post) => post.id === postId);
+
+  if (index === -1) return null;
+
+  const updatedPost: FeedPost = {
+    ...posts[index],
+    audience,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const updated = [...posts];
+  updated[index] = updatedPost;
+
+  await saveFeedPosts(updated);
+
+  return updatedPost;
+}
+
+export async function toggleFeedPostNotifications(
+  postId: string,
+): Promise<FeedPost | null> {
+  const posts = await loadFeedPosts();
+  const index = posts.findIndex((post) => post.id === postId);
+
+  if (index === -1) return null;
+
+  const updatedPost: FeedPost = {
+    ...posts[index],
+    notificationsEnabled: !posts[index].notificationsEnabled,
+  };
+
+  const updated = [...posts];
+  updated[index] = updatedPost;
+
+  await saveFeedPosts(updated);
+
+  return updatedPost;
+}
+
+export async function archiveFeedPost(
+  postId: string,
+): Promise<FeedPost | null> {
+  const posts = await loadFeedPosts();
+  const index = posts.findIndex((post) => post.id === postId);
+
+  if (index === -1) return null;
+
+  const updatedPost: FeedPost = {
+    ...posts[index],
+    archived: true,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const updated = [...posts];
+  updated[index] = updatedPost;
+
+  await saveFeedPosts(updated);
+
+  return updatedPost;
 }
 
 export async function toggleFeedLike(
@@ -433,4 +548,136 @@ export async function addFeedComment(input: {
   await saveFeedPosts(updatedPosts);
 
   return comment;
+}
+
+const FOLLOWS_STORAGE_KEY = "@nexchat/feed/follows/v1";
+
+export type FeedFollowMap = Record<string, string[]>;
+
+async function loadFeedFollowMap(): Promise<FeedFollowMap> {
+  try {
+    const raw = await AsyncStorage.getItem(FOLLOWS_STORAGE_KEY);
+
+    if (!raw) {
+      return {};
+    }
+
+    const parsed = JSON.parse(raw);
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+
+    const normalized: FeedFollowMap = {};
+
+    for (const [userId, followedIds] of Object.entries(parsed)) {
+      if (!Array.isArray(followedIds)) {
+        continue;
+      }
+
+      normalized[userId] = Array.from(
+        new Set(
+          followedIds.filter(
+            (value): value is string =>
+              typeof value === "string" && value.trim().length > 0,
+          ),
+        ),
+      );
+    }
+
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
+async function saveFeedFollowMap(map: FeedFollowMap): Promise<void> {
+  await AsyncStorage.setItem(
+    FOLLOWS_STORAGE_KEY,
+    JSON.stringify(map),
+  );
+}
+
+export async function isFollowingFeedCreator(
+  followerId: string,
+  creatorId: string,
+): Promise<boolean> {
+  if (!followerId || !creatorId || followerId === creatorId) {
+    return false;
+  }
+
+  const map = await loadFeedFollowMap();
+
+  return (map[followerId] ?? []).includes(creatorId);
+}
+
+export async function getFeedFollowCounts(
+  creatorId: string,
+): Promise<{
+  followers: number;
+  following: number;
+}> {
+  if (!creatorId) {
+    return {
+      followers: 0,
+      following: 0,
+    };
+  }
+
+  const map = await loadFeedFollowMap();
+
+  const following = (map[creatorId] ?? []).length;
+
+  let followers = 0;
+
+  for (const followedIds of Object.values(map)) {
+    if (followedIds.includes(creatorId)) {
+      followers += 1;
+    }
+  }
+
+  return {
+    followers,
+    following,
+  };
+}
+
+export async function toggleFeedFollow(
+  followerId: string,
+  creatorId: string,
+): Promise<{
+  following: boolean;
+  followers: number;
+  followingCount: number;
+}> {
+  if (!followerId || !creatorId || followerId === creatorId) {
+    const counts = await getFeedFollowCounts(creatorId);
+
+    return {
+      following: false,
+      followers: counts.followers,
+      followingCount: counts.following,
+    };
+  }
+
+  const map = await loadFeedFollowMap();
+  const current = new Set(map[followerId] ?? []);
+
+  if (current.has(creatorId)) {
+    current.delete(creatorId);
+  } else {
+    current.add(creatorId);
+  }
+
+  map[followerId] = Array.from(current);
+
+  await saveFeedFollowMap(map);
+
+  const counts = await getFeedFollowCounts(creatorId);
+
+  return {
+    following: current.has(creatorId),
+    followers: counts.followers,
+    followingCount: counts.following,
+  };
 }
