@@ -30,8 +30,83 @@ type Tab="Chats"|"Stories"|"Feed"|"Calls"|"Settings";
 type Screen={name:"home"}|{name:"chat";peerId:string}|{name:"new"}|{name:"contact";peerId:string}|{name:"settings"}|{name:"settingsSection";section:string};
 const icon=(x:string)=><Text style={{fontSize:19}}>{x}</Text>;
 
-function Button({label,onPress,secondary=false,danger=false}:{label:string;onPress:()=>void;secondary?:boolean;danger?:boolean}){return <TouchableOpacity onPress={onPress} style={[s.button,secondary&&s.secondary,danger&&s.danger]}><Text style={[s.buttonText,secondary&&{color:"#123"},danger&&{color:"white"}]}>{label}</Text></TouchableOpacity>}
-function Row({icon:ic,title,subtitle,onPress,right}:{icon:string;title:string;subtitle?:string;onPress?:()=>void;right?:React.ReactNode}){return <TouchableOpacity disabled={!onPress} onPress={onPress} style={s.row}><Text style={s.rowIcon}>{ic}</Text><View style={{flex:1}}><Text style={s.rowTitle}>{title}</Text>{subtitle&&<Text style={s.rowSub}>{subtitle}</Text>}</View>{right||<Text style={s.chevron}>›</Text>}</TouchableOpacity>}
+function Button({label,onPress,secondary=false,danger=false,theme}:{label:string;onPress:()=>void;secondary?:boolean;danger?:boolean;theme?:any}){
+  const buttonTheme = theme || themes.light;
+
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      style={[
+        s.button,
+        secondary && [
+          s.secondary,
+          {
+            backgroundColor: buttonTheme.surface,
+            borderColor: buttonTheme.line,
+            borderWidth: 1,
+          },
+        ],
+        danger && s.danger,
+      ]}
+    >
+      <Text
+        style={[
+          s.buttonText,
+          secondary && {color: buttonTheme.ink},
+          danger && {color:"white"},
+        ]}
+      >
+        {label}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
+function Row({
+  icon:ic,
+  title,
+  subtitle,
+  onPress,
+  right,
+  theme,
+}:{
+  icon:string;
+  title:string;
+  subtitle?:string;
+  onPress?:()=>void;
+  right?:React.ReactNode;
+  theme?:any;
+}){
+  const rowTheme = theme || themes.light;
+
+  return (
+    <TouchableOpacity
+      disabled={!onPress}
+      onPress={onPress}
+      style={s.row}
+    >
+      <Text style={s.rowIcon}>{ic}</Text>
+
+      <View style={{flex:1}}>
+        <Text style={[s.rowTitle,{color:rowTheme.ink}]}>
+          {title}
+        </Text>
+
+        {subtitle && (
+          <Text style={[s.rowSub,{color:rowTheme.muted}]}>
+            {subtitle}
+          </Text>
+        )}
+      </View>
+
+      {right || (
+        <Text style={[s.chevron,{color:rowTheme.muted}]}>
+          ›
+        </Text>
+      )}
+    </TouchableOpacity>
+  );
+}
 function Header({title,subtitle,onBack,onInfo,onCall,onVideo,theme}:{title:string;subtitle?:string;onBack?:()=>void;onInfo?:()=>void;onCall?:()=>void;onVideo?:()=>void;theme:any}){return <View style={[s.header,{backgroundColor:theme.card,borderBottomColor:theme.line}]}><TouchableOpacity onPress={onBack} disabled={!onBack} style={s.headBack}><Text style={{color:theme.ink,fontSize:28}}>{onBack?"‹":""}</Text></TouchableOpacity><View style={{flex:1}}><Text style={[s.headTitle,{color:theme.ink}]}>{title}</Text>{subtitle&&<Text style={[s.headSub,{color:theme.muted}]}>{subtitle}</Text>}</View>{onCall&&<TouchableOpacity onPress={onCall} style={s.headAction}>{icon("📞")}</TouchableOpacity>}{onVideo&&<TouchableOpacity onPress={onVideo} style={s.headAction}>{icon("🎥")}</TouchableOpacity>}{onInfo&&<TouchableOpacity onPress={onInfo} style={s.headAction}>{icon("ⓘ")}</TouchableOpacity>}</View>}
 
 function NewMessage({
@@ -843,7 +918,118 @@ function ContactInfo({peerId,theme,onBack,onCall,onVideo,onDeleted}:{peerId:stri
   )}
 </View><Text style={[s.profileName,{color:theme.ink}]}>{c?.displayName||peerId}</Text><Text style={{color:theme.muted}}>@{c?.username||"nexchat"}</Text><Text style={{color:theme.muted}}>{peerId}</Text><View style={{flexDirection:"row",gap:12,marginTop:14}}><Button label="📞 Voice" onPress={onCall}/><Button label="🎥 Video" onPress={onVideo}/></View></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="🔐" title="Encryption" subtitle="End-to-end encrypted"/><Row icon="🔔" title="Notifications" subtitle={conv?.muted?"Muted":"On"}/><Row icon="⏱" title="Disappearing messages" subtitle={conv?.disappearingSeconds?`${conv.disappearingSeconds}s`:"Off"} onPress={()=>setDisappearingMenuVisible(true)}/><Row icon="👁" title="View-once media" subtitle="Available per message"/><Row icon="🎨" title="Chat theme" subtitle={conv?.theme||"Global theme"} onPress={()=>Alert.alert("Chat theme","Choose",[{text:"System",onPress:()=>st.setConversation(peerId,{theme:"system"})},{text:"Light",onPress:()=>st.setConversation(peerId,{theme:"light"})},{text:"Dark",onPress:()=>st.setConversation(peerId,{theme:"dark"})}])}/><Row icon="📌" title="Pin chat" right={<Switch value={!!conv?.pinned} onValueChange={v=>st.pinConversation(peerId,v)}/>} /><Row icon="📦" title="Archive chat" right={<Switch value={!!conv?.archived} onValueChange={v=>st.archiveConversation(peerId,v)}/>} /></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Text style={[s.sectionTitle,{color:theme.ink}]}>Shared media</Text><View style={{flexDirection:"row",flexWrap:"wrap"}}>{media.slice(-12).map(m=><MediaPreview key={m.id} media={m}/>)}</View>{media.length>0&&<Text style={{color:theme.muted,marginTop:6}}>{media.length} attachment(s) • retrievable from this chat</Text>}<Row icon="🔗" title="Links" subtitle={`${links.length} shared link(s)`}/><Row icon="📄" title="Files" subtitle={`${media.filter(m=>m.type==="file").length} file(s)`}/></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Text style={[s.sectionTitle,{color:theme.ink}]}>Connection / P2P</Text><Row icon="🌐" title="Preferred route" subtitle="Automatic"/><Row icon="📶" title="Nearby" subtitle="Bluetooth / Wi-Fi Direct (native build)"/><Row icon="🛡" title="Relay preference" subtitle="Privacy-first when direct P2P is not required"/></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="🚫" title="Block contact" onPress={()=>Alert.alert("Block contact?","They will not be able to message or call you.",[{text:"Block",style:"destructive",onPress:()=>st.block(peerId)},{text:"Cancel",style:"cancel"}])}/><Row icon="⚠" title="Report contact" onPress={()=>Alert.alert("Report","Report flow will be connected to moderation services in the services repository.")}/><Row icon="🗑" title="Clear chat" onPress={()=>Alert.alert("Clear chat","Local messages will be removed from this conversation.",[{text:"Clear",style:"destructive",onPress:()=>st.clearConversation(peerId)},{text:"Cancel",style:"cancel"}])}/><Row icon="⛔" title="Delete chat" onPress={()=>Alert.alert("Delete chat?","This removes the entire conversation from your chat list. This cannot be undone.",[{text:"Delete",style:"destructive",onPress:async()=>{await st.deleteConversation(peerId);onDeleted()}},{text:"Cancel",style:"cancel"}])}/></View></ScrollView><ActionSheet visible={disappearingMenuVisible} title="Disappearing messages" message="Choose a timer" options={disappearingMenuOptions} onRequestClose={()=>setDisappearingMenuVisible(false)} theme={theme}/></View>}
 
-function Settings({theme,onSection,onBack}:{theme:any;onSection:(s:string)=>void;onBack:()=>void}){const st=useNexChatStore();return <View style={s.flex}><Header title="Settings" subtitle="Every item opens a real control" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={{padding:12,paddingBottom:40}}><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="👤" title="Profile" subtitle="Name, username and NexChat ID" onPress={()=>onSection("profile")}/><Row icon="🔐" title="Account & Security" subtitle="Passcode, biometrics, trusted devices" onPress={()=>onSection("security")}/><Row icon="🛡" title="Privacy" subtitle="Presence, receipts, blocked contacts" onPress={()=>onSection("privacy")}/><Row icon="💾" title="Backup & Recovery" subtitle={`${st.settings.backupEnabled?st.settings.backupSchedule:"Off"} • encrypted`} onPress={()=>onSection("backup")}/></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="💬" title="Chats" subtitle="Disappearing messages, view-once, storage" onPress={()=>onSection("chats")}/><Row icon="🎨" title="Appearance & Themes" subtitle={st.settings.theme} onPress={()=>onSection("appearance")}/><Row icon="🔔" title="Notifications & Calls" subtitle="Messages, calls and sounds" onPress={()=>onSection("notifications")}/><Row icon="📦" title="Media & Storage" subtitle="Downloads, cache and attachment behavior" onPress={()=>onSection("media")}/></View><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="📡" title="Connections / P2P" subtitle="Internet, relay, Bluetooth and Wi-Fi Direct" onPress={()=>onSection("p2p")}/><Row icon="🚫" title="Blocked contacts" subtitle={`${st.blockedIds.length} blocked`} onPress={()=>onSection("blocked")}/><Row icon="📱" title="Devices" subtitle="Trusted devices and remote actions" onPress={()=>onSection("devices")}/></View></ScrollView></View>}
+function Settings({theme,onSection,onBack}:{theme:any;onSection:(s:string)=>void;onBack:()=>void}){
+  const st=useNexChatStore();
+
+  return (
+    <View style={s.flex}>
+      <Header
+        title="Settings"
+        subtitle="Every item opens a real control"
+        onBack={onBack}
+        theme={theme}
+      />
+
+      <ScrollView contentContainerStyle={{padding:12,paddingBottom:40}}>
+
+        <View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}>
+          <Row
+            icon="👤"
+            title="Profile"
+            subtitle="Name, username and NexChat ID"
+            onPress={()=>onSection("profile")}
+            theme={theme}
+          />
+
+          <Row
+            icon="🔐"
+            title="Account & Security"
+            subtitle="Passcode, biometrics, trusted devices"
+            onPress={()=>onSection("security")}
+            theme={theme}
+          />
+
+          <Row
+            icon="🛡"
+            title="Privacy"
+            subtitle="Presence, receipts, blocked contacts"
+            onPress={()=>onSection("privacy")}
+            theme={theme}
+          />
+
+          <Row
+            icon="💾"
+            title="Backup & Recovery"
+            subtitle={`${st.settings.backupEnabled?st.settings.backupSchedule:"Off"} • encrypted`}
+            onPress={()=>onSection("backup")}
+            theme={theme}
+          />
+        </View>
+
+        <View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}>
+          <Row
+            icon="💬"
+            title="Chats"
+            subtitle="Disappearing messages, view-once, storage"
+            onPress={()=>onSection("chats")}
+            theme={theme}
+          />
+
+          <Row
+            icon="🎨"
+            title="Appearance & Themes"
+            subtitle={st.settings.theme}
+            onPress={()=>onSection("appearance")}
+            theme={theme}
+          />
+
+          <Row
+            icon="🔔"
+            title="Notifications & Calls"
+            subtitle="Messages, calls and sounds"
+            onPress={()=>onSection("notifications")}
+            theme={theme}
+          />
+
+          <Row
+            icon="📦"
+            title="Media & Storage"
+            subtitle="Downloads, cache and attachment behavior"
+            onPress={()=>onSection("media")}
+            theme={theme}
+          />
+        </View>
+
+        <View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}>
+          <Row
+            icon="📡"
+            title="Connections / P2P"
+            subtitle="Internet, relay, Bluetooth and Wi-Fi Direct"
+            onPress={()=>onSection("p2p")}
+            theme={theme}
+          />
+
+          <Row
+            icon="🚫"
+            title="Blocked contacts"
+            subtitle={`${st.blockedIds.length} blocked`}
+            onPress={()=>onSection("blocked")}
+            theme={theme}
+          />
+
+          <Row
+            icon="📱"
+            title="Devices"
+            subtitle="Trusted devices and remote actions"
+            onPress={()=>onSection("devices")}
+            theme={theme}
+          />
+        </View>
+
+      </ScrollView>
+    </View>
+  );
+}
 
 function SettingSection({section,theme,onBack}:{section:string;theme:any;onBack:()=>void}){const st=useNexChatStore();const [id,setId]=useState<Identity|null>(null);const [name,setName]=useState("");const [username,setUsername]=useState("");useEffect(()=>{getIdentity().then(x=>{setId(x);setName(x.displayName);setUsername(x.username)})},[]);const saveProfile=async()=>{await updateIdentity({displayName:name.trim()||"NexChat User",username:username.trim().replace(/^@/,"")||"user"});Alert.alert("Saved","Profile updated locally.")};if(section==="profile") {
   const profilePhoto = async () => {
@@ -895,7 +1081,15 @@ function SettingSection({section,theme,onBack}:{section:string;theme:any;onBack:
         theme={theme}
       />
 
-      <ScrollView contentContainerStyle={s.form}>
+      <KeyboardAvoidingView
+        style={s.flex}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 20}
+      >
+        <ScrollView
+          contentContainerStyle={[s.form, {paddingBottom: 180}]}
+          keyboardShouldPersistTaps="handled"
+        >
         <View
           style={{
             alignItems: "center",
@@ -945,6 +1139,7 @@ function SettingSection({section,theme,onBack}:{section:string;theme:any;onBack:
                   : "Add photo"
               }
               onPress={profilePhoto}
+              theme={theme}
             />
 
             {id?.avatarUri && (
@@ -952,6 +1147,7 @@ function SettingSection({section,theme,onBack}:{section:string;theme:any;onBack:
                 label="Remove"
                 secondary
                 onPress={removeProfilePhoto}
+                theme={theme}
               />
             )}
           </View>
@@ -982,11 +1178,99 @@ function SettingSection({section,theme,onBack}:{section:string;theme:any;onBack:
         <Button
           label="Copy ID"
           secondary
+          theme={theme}
           onPress={() =>
             id &&
             Clipboard.setStringAsync(id.id)
           }
         />
+
+        <Text
+          style={[
+            s.label,
+            { color: theme.ink },
+          ]}
+        >
+          Personal NexChat Link
+        </Text>
+
+        <View
+          style={[
+            s.qrCard,
+            {
+              backgroundColor: theme.card,
+              borderColor: theme.line,
+              alignItems: "stretch",
+            },
+          ]}
+        >
+          <Text
+            style={{
+              color: theme.ink,
+              fontWeight: "900",
+              fontSize: 16,
+              textAlign: "center",
+            }}
+          >
+            nexchat://user/{id?.id || "…"}
+          </Text>
+
+          <Text
+            style={{
+              color: theme.muted,
+              textAlign: "center",
+              marginTop: 6,
+              marginBottom: 12,
+            }}
+          >
+            Send this link to someone so they can open your NexChat profile and start a conversation.
+          </Text>
+
+          <View style={{gap: 8}}>
+            <Button
+              label="Copy personal link"
+              secondary
+              theme={theme}
+              onPress={async () => {
+                if (!id) {
+                  return;
+                }
+
+                await Clipboard.setStringAsync(
+                  `nexchat://user/${id.id}`
+                );
+
+                Alert.alert(
+                  "Link copied",
+                  "Your personal NexChat link is ready to paste and send."
+                );
+              }}
+            />
+
+            <Button
+              label="Share personal link"
+              theme={theme}
+              onPress={async () => {
+                if (!id) {
+                  return;
+                }
+
+                try {
+                  await Share.share({
+                    message: `Chat with me on NexChat: nexchat://user/${id.id}`,
+                  });
+                } catch (e) {
+                  Alert.alert(
+                    "Share unavailable",
+                    e instanceof Error
+                      ? e.message
+                      : "Unable to share your NexChat link."
+                  );
+                }
+              }}
+            />
+          </View>
+        </View>
 
         <Text
           style={[
@@ -1081,6 +1365,7 @@ function SettingSection({section,theme,onBack}:{section:string;theme:any;onBack:
         <Button
           label="Save profile"
           onPress={saveProfile}
+          theme={theme}
         />
 
         <Text
@@ -1091,7 +1376,8 @@ function SettingSection({section,theme,onBack}:{section:string;theme:any;onBack:
           Your NexChat ID remains independent of
           your phone number.
         </Text>
-      </ScrollView>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </View>
   );
 }
@@ -1575,4 +1861,4 @@ if(startupError){return <View style={[s.safe,{backgroundColor:theme.bg}]}><Statu
 
 export default function App(){return <SafeAreaProvider><AppContent/></SafeAreaProvider>}
 
-const s=StyleSheet.create({safe:{flex:1},flex:{flex:1},header:{minHeight:68,paddingHorizontal:8,flexDirection:"row",alignItems:"center",borderBottomWidth:1},headBack:{width:42,alignItems:"center"},headTitle:{fontSize:18,fontWeight:"900"},headSub:{fontSize:11,marginTop:2},headAction:{width:42,alignItems:"center"},empty:{flex:1,alignItems:"center",justifyContent:"center",padding:30,gap:8},chatRow:{padding:12,borderWidth:1,borderRadius:16,marginBottom:8,flexDirection:"row",gap:12},avatar:{width:48,height:48,borderRadius:24,alignItems:"center",justifyContent:"center"},chatName:{fontWeight:"900",fontSize:16},fab:{position:"absolute",right:18,bottom:78,width:58,height:58,borderRadius:29,alignItems:"center",justifyContent:"center",elevation:4},nav:{minHeight:66,borderTopWidth:1,flexDirection:"row",justifyContent:"space-around",paddingTop:8},navItem:{alignItems:"center",gap:2,minWidth:55},form:{padding:16,gap:12},label:{fontWeight:"900",marginTop:8},input:{borderWidth:1,borderRadius:14,padding:13,fontSize:15},chip:{borderWidth:1,borderRadius:14,padding:10,marginRight:8,minWidth:120},button:{backgroundColor:"#0C5A8D",paddingVertical:13,paddingHorizontal:16,borderRadius:14,alignItems:"center",justifyContent:"center"},secondary:{backgroundColor:"#E7EEF4"},danger:{backgroundColor:"#B42318"},buttonText:{color:"white",fontWeight:"900"},toggleLine:{flexDirection:"row",justifyContent:"space-between",alignItems:"center"},bubble:{maxWidth:"82%",padding:10,borderRadius:16,borderWidth:1,marginVertical:2},composer:{padding:8,borderTopWidth:1},messageInput:{flex:1,maxHeight:120,minHeight:44,borderWidth:1,borderRadius:22,paddingHorizontal:15,paddingVertical:10},send:{width:44,height:44,borderRadius:22,alignItems:"center",justifyContent:"center"},encryptedBar:{padding:7,alignItems:"center",borderBottomWidth:1},section:{marginBottom:12,borderWidth:1,borderRadius:16,overflow:"hidden"},row:{minHeight:58,paddingHorizontal:14,paddingVertical:9,flexDirection:"row",alignItems:"center",gap:12},rowIcon:{fontSize:19,width:25,textAlign:"center"},rowTitle:{fontWeight:"800",fontSize:15},rowSub:{fontSize:11,color:"#66788A",marginTop:2},chevron:{fontSize:25,color:"#78909C"},sectionTitle:{fontWeight:"900",fontSize:16,padding:14,paddingBottom:4},profileHead:{alignItems:"center",padding:24},bigAvatar:{width:96,height:96,borderRadius:48,alignItems:"center",justifyContent:"center"},profileName:{fontSize:23,fontWeight:"900",marginTop:10},idBox:{borderWidth:1,borderRadius:14,padding:15,fontWeight:"900",textAlign:"center"},bigStat:{fontSize:30,fontWeight:"900"},overlay:{flex:1,backgroundColor:"#0009",alignItems:"center",justifyContent:"center",padding:24},dialog:{width:"92%",padding:20,borderRadius:20,gap:12},dialogTitle:{fontSize:20,fontWeight:"900"},callOverlay:{flex:1,backgroundColor:"#000B",alignItems:"center",justifyContent:"center",padding:20},callCard:{width:"90%",borderRadius:26,padding:28,alignItems:"center",gap:10},profilePhoto:{width:120,height:120,borderRadius:60,borderWidth:2,alignItems:"center",justifyContent:"center",overflow:"hidden"},profilePhotoImage:{width:120,height:120,borderRadius:60},qrCard:{alignItems:"center",justifyContent:"center",padding:20,borderWidth:1,borderRadius:20},qrName:{fontSize:18,fontWeight:"900",marginTop:14}})
+const s=StyleSheet.create({safe:{flex:1},flex:{flex:1},header:{minHeight:68,paddingHorizontal:8,flexDirection:"row",alignItems:"center",borderBottomWidth:1},headBack:{width:42,alignItems:"center"},headTitle:{fontSize:18,fontWeight:"900"},headSub:{fontSize:11,marginTop:2},headAction:{width:42,alignItems:"center"},empty:{flex:1,alignItems:"center",justifyContent:"center",padding:30,gap:8},chatRow:{padding:12,borderWidth:1,borderRadius:16,marginBottom:8,flexDirection:"row",gap:12},avatar:{width:48,height:48,borderRadius:24,alignItems:"center",justifyContent:"center"},chatName:{fontWeight:"900",fontSize:16},fab:{position:"absolute",right:18,bottom:78,width:58,height:58,borderRadius:29,alignItems:"center",justifyContent:"center",elevation:4},nav:{minHeight:66,borderTopWidth:1,flexDirection:"row",justifyContent:"space-around",paddingTop:8},navItem:{alignItems:"center",gap:2,minWidth:55},form:{padding:16,gap:12},label:{fontWeight:"900",marginTop:8},input:{borderWidth:1,borderRadius:14,padding:13,fontSize:15},chip:{borderWidth:1,borderRadius:14,padding:10,marginRight:8,minWidth:120},button:{backgroundColor:"#0C5A8D",paddingVertical:13,paddingHorizontal:16,borderRadius:14,alignItems:"center",justifyContent:"center"},secondary:{backgroundColor:"#E7EEF4"},danger:{backgroundColor:"#B42318"},buttonText:{color:"white",fontWeight:"900"},toggleLine:{flexDirection:"row",justifyContent:"space-between",alignItems:"center"},bubble:{maxWidth:"82%",padding:10,borderRadius:16,borderWidth:1,marginVertical:2},composer:{padding:8,borderTopWidth:1},messageInput:{flex:1,maxHeight:120,minHeight:44,borderWidth:1,borderRadius:22,paddingHorizontal:15,paddingVertical:10},send:{width:44,height:44,borderRadius:22,alignItems:"center",justifyContent:"center"},encryptedBar:{padding:7,alignItems:"center",borderBottomWidth:1},section:{marginBottom:12,borderWidth:1,borderRadius:16,overflow:"hidden"},row:{minHeight:58,paddingHorizontal:14,paddingVertical:9,flexDirection:"row",alignItems:"center",gap:12},rowIcon:{fontSize:19,width:25,textAlign:"center"},rowTitle:{fontWeight:"800",fontSize:15},rowSub:{fontSize:11,marginTop:2},chevron:{fontSize:25},sectionTitle:{fontWeight:"900",fontSize:16,padding:14,paddingBottom:4},profileHead:{alignItems:"center",padding:24},bigAvatar:{width:96,height:96,borderRadius:48,alignItems:"center",justifyContent:"center"},profileName:{fontSize:23,fontWeight:"900",marginTop:10},idBox:{borderWidth:1,borderRadius:14,padding:15,fontWeight:"900",textAlign:"center"},bigStat:{fontSize:30,fontWeight:"900"},overlay:{flex:1,backgroundColor:"#0009",alignItems:"center",justifyContent:"center",padding:24},dialog:{width:"92%",padding:20,borderRadius:20,gap:12},dialogTitle:{fontSize:20,fontWeight:"900"},callOverlay:{flex:1,backgroundColor:"#000B",alignItems:"center",justifyContent:"center",padding:20},callCard:{width:"90%",borderRadius:26,padding:28,alignItems:"center",gap:10},profilePhoto:{width:120,height:120,borderRadius:60,borderWidth:2,alignItems:"center",justifyContent:"center",overflow:"hidden"},profilePhotoImage:{width:120,height:120,borderRadius:60},qrCard:{alignItems:"center",justifyContent:"center",padding:20,borderWidth:1,borderRadius:20},qrName:{fontSize:18,fontWeight:"900",marginTop:14}})
