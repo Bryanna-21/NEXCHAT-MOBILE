@@ -78,7 +78,7 @@ async function getKey(): Promise<Uint8Array> {
 }
 
 export async function initVault(): Promise<void> {
-  return;
+  await getKey();
 }
 
 export async function saveVault(value: unknown): Promise<void> {

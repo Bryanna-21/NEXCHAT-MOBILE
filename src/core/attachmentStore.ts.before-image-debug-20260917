@@ -55,19 +55,7 @@ function attachmentUri(
 export async function storeAttachment(
   attachment: StoredAttachment,
 ): Promise<StoredAttachment> {
-  console.log("[NEXCHAT ATTACHMENT] STORE START", {
-    id: attachment.id,
-    type: attachment.type,
-    uri: attachment.uri,
-    mimeType: attachment.mimeType,
-    size: attachment.size,
-  });
-
   await ensureRoot();
-
-  console.log("[NEXCHAT ATTACHMENT] ROOT READY", {
-    root: ROOT,
-  });
 
   const destination =
     attachmentUri(attachment.id);
@@ -90,16 +78,10 @@ export async function storeAttachment(
     };
   }
 
-  console.log("[NEXCHAT ATTACHMENT] CHECKING SOURCE", {
-    uri: attachment.uri,
-  });
-
   const sourceInfo =
     await FileSystem.getInfoAsync(
       attachment.uri,
     );
-
-  console.log("[NEXCHAT ATTACHMENT] SOURCE INFO", sourceInfo);
 
   if (!sourceInfo.exists) {
     throw new Error(
@@ -118,26 +100,15 @@ export async function storeAttachment(
     );
   }
 
-  console.log("[NEXCHAT ATTACHMENT] COPY START", {
-    from: attachment.uri,
-    to: destination,
-  });
-
   await FileSystem.copyAsync({
     from: attachment.uri,
     to: destination,
-  });
-
-  console.log("[NEXCHAT ATTACHMENT] COPY COMPLETE", {
-    destination,
   });
 
   const copiedInfo =
     await FileSystem.getInfoAsync(
       destination,
     );
-
-  console.log("[NEXCHAT ATTACHMENT] DESTINATION INFO", copiedInfo);
 
   if (!copiedInfo.exists) {
     throw new Error(

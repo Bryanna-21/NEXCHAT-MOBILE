@@ -1,4 +1,6 @@
 import React from "react";
+import type { ReactNode } from "react";
+
 import {
   Image,
   Pressable,
@@ -8,7 +10,13 @@ import {
   View,
 } from "react-native";
 
-import { FeedCreator, FeedPost } from "../core/feed";
+import {
+  FeedCreator,
+  FeedPost,
+  getFeedFollowCounts,
+  isFollowingFeedCreator,
+  toggleFeedFollow,
+} from "../core/feed";
 
 type FeedProfileTheme = {
   bg: string;
@@ -25,6 +33,7 @@ type FeedProfileScreenProps = {
   posts: FeedPost[];
   currentUserId: string;
   onBack: () => void;
+  renderPostMedia?: (post: FeedPost) => ReactNode;
 };
 
 function initialsFor(name: string): string {
@@ -38,12 +47,12 @@ function initialsFor(name: string): string {
 }
 
 export function FeedProfileScreen({
-
   theme,
   creator,
   posts,
   currentUserId,
   onBack,
+  renderPostMedia,
 }: FeedProfileScreenProps) {
   const creatorPosts = posts.filter(
     (post) => post.creator.id === creator.id,
@@ -51,6 +60,57 @@ export function FeedProfileScreen({
 
   const isOwnProfile = creator.id === currentUserId;
   const initials = initialsFor(creator.name);
+
+  const [following, setFollowing] = React.useState(false);
+  const [followersCount, setFollowersCount] = React.useState(0);
+  const [followingCount, setFollowingCount] = React.useState(0);
+  const [followLoading, setFollowLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    let mounted = true;
+
+    const loadFollowState = async () => {
+      const [isFollowing, counts] = await Promise.all([
+        isFollowingFeedCreator(currentUserId, creator.id),
+        getFeedFollowCounts(creator.id),
+      ]);
+
+      if (!mounted) {
+        return;
+      }
+
+      setFollowing(isFollowing);
+      setFollowersCount(counts.followers);
+      setFollowingCount(counts.following);
+    };
+
+    void loadFollowState();
+
+    return () => {
+      mounted = false;
+    };
+  }, [creator.id, currentUserId]);
+
+  const handleFollow = async () => {
+    if (isOwnProfile || followLoading) {
+      return;
+    }
+
+    setFollowLoading(true);
+
+    try {
+      const result = await toggleFeedFollow(
+        currentUserId,
+        creator.id,
+      );
+
+      setFollowing(result.following);
+      setFollowersCount(result.followers);
+      setFollowingCount(result.followingCount);
+    } finally {
+      setFollowLoading(false);
+    }
+  };
 
   return (
     <View style={[styles.container, { backgroundColor: theme.bg }]}>
@@ -122,9 +182,102 @@ export function FeedProfileScreen({
             </Text>
           ) : null}
 
-          <Text style={[styles.nexId, { color: theme.muted }]}>
-            NexChat ID: {creator.id}
-          </Text>
+          {!!creator.bio && (
+            <Text style={[styles.bio, { color: theme.ink }]}>
+              {creator.bio}
+            </Text>
+          )}
+
+          {(creator.website || creator.location || creator.pronouns) ? (
+            <View
+              style={[
+                styles.profileDetails,
+                {
+                  borderColor: theme.line,
+                  backgroundColor: theme.bg,
+                },
+              ]}
+            >
+              {!!creator.website && (
+                <Text style={[styles.detailText, { color: theme.brand }]}>
+                  {creator.website}
+                </Text>
+              )}
+
+              {!!creator.location && (
+                <Text style={[styles.detailText, { color: theme.muted }]}>
+                  📍 {creator.location}
+                </Text>
+              )}
+
+              {!!creator.pronouns && (
+                <Text style={[styles.detailText, { color: theme.muted }]}>
+                  {creator.pronouns}
+                </Text>
+              )}
+            </View>
+          ) : null}
+
+          {!!creator.joinedAt && (
+            <Text style={[styles.joinedText, { color: theme.muted }]}>
+              Joined NexChat{" "}
+              {new Date(creator.joinedAt).toLocaleDateString([], {
+                month: "long",
+                year: "numeric",
+              })}
+            </Text>
+          )}
+
+          <View
+            style={[
+              styles.statsRow,
+              {
+                borderTopColor: theme.line,
+                borderBottomColor: theme.line,
+              },
+            ]}
+          >
+            <View style={styles.stat}>
+              <Text style={[styles.statNumber, { color: theme.ink }]}>
+                {creatorPosts.length}
+              </Text>
+              <Text style={[styles.statLabel, { color: theme.muted }]}>
+                Posts
+              </Text>
+            </View>
+
+            <View
+              style={[
+                styles.statDivider,
+                { backgroundColor: theme.line },
+              ]}
+            />
+
+            <View style={styles.stat}>
+              <Text style={[styles.statNumber, { color: theme.ink }]}>
+                {followersCount}
+              </Text>
+              <Text style={[styles.statLabel, { color: theme.muted }]}>
+                Followers
+              </Text>
+            </View>
+
+            <View
+              style={[
+                styles.statDivider,
+                { backgroundColor: theme.line },
+              ]}
+            />
+
+            <View style={styles.stat}>
+              <Text style={[styles.statNumber, { color: theme.ink }]}>
+                {followingCount}
+              </Text>
+              <Text style={[styles.statLabel, { color: theme.muted }]}>
+                Following
+              </Text>
+            </View>
+          </View>
 
           {isOwnProfile ? (
             <View
@@ -140,7 +293,37 @@ export function FeedProfileScreen({
                 Your profile
               </Text>
             </View>
-          ) : null}
+          ) : (
+            <Pressable
+              onPress={handleFollow}
+              disabled={followLoading}
+              accessibilityRole="button"
+              accessibilityLabel={
+                following ? "Unfollow profile" : "Follow profile"
+              }
+              style={[
+                styles.followButton,
+                {
+                  backgroundColor: following
+                    ? theme.bg
+                    : theme.brand,
+                  borderColor: theme.brand,
+                  opacity: followLoading ? 0.65 : 1,
+                },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.followButtonText,
+                  {
+                    color: following ? theme.brand : "#FFFFFF",
+                  },
+                ]}
+              >
+                {following ? "Following" : "Follow"}
+              </Text>
+            </Pressable>
+          )}
         </View>
 
         <View style={styles.sectionHeader}>
@@ -187,6 +370,8 @@ export function FeedProfileScreen({
                   {post.text}
                 </Text>
               )}
+
+              {renderPostMedia?.(post)}
 
               <Text style={[styles.postDate, { color: theme.muted }]}>
                 {new Date(post.createdAt).toLocaleString()}
@@ -261,10 +446,73 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "700",
   },
-  nexId: {
+  bio: {
+    marginTop: 14,
+    maxWidth: 340,
+    fontSize: 14,
+    lineHeight: 21,
+    textAlign: "center",
+  },
+  profileDetails: {
+    width: "100%",
+    marginTop: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderRadius: 14,
+    alignItems: "center",
+    gap: 6,
+  },
+  detailText: {
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: "center",
+  },
+  joinedText: {
     marginTop: 10,
     fontSize: 12,
     textAlign: "center",
+  },
+  statsRow: {
+    width: "100%",
+    marginTop: 20,
+    paddingVertical: 14,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-around",
+  },
+  stat: {
+    flex: 1,
+    alignItems: "center",
+  },
+  statNumber: {
+    fontSize: 18,
+    fontWeight: "900",
+  },
+  statLabel: {
+    marginTop: 3,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  statDivider: {
+    width: StyleSheet.hairlineWidth,
+    height: 34,
+  },
+  followButton: {
+    minWidth: 150,
+    marginTop: 18,
+    paddingHorizontal: 24,
+    paddingVertical: 11,
+    borderRadius: 999,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  followButtonText: {
+    fontSize: 14,
+    fontWeight: "900",
   },
   youBadge: {
     marginTop: 14,

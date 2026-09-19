@@ -15,6 +15,11 @@ export type FeedCreator = {
   name: string;
   username?: string;
   avatarUri?: string;
+  bio?: string;
+  website?: string;
+  location?: string;
+  pronouns?: string;
+  joinedAt?: string;
 };
 
 export type FeedAttachment = {
@@ -35,6 +40,22 @@ export type FeedComment = {
   author: FeedCreator;
   text: string;
   createdAt: string;
+
+  /**
+   * Parent comment ID for nested replies.
+   * Undefined means this is a top-level comment.
+   */
+  parentId?: string;
+
+  /**
+   * IDs of users who currently like this comment.
+   */
+  likedBy?: string[];
+
+  /**
+   * Reaction counts keyed by emoji.
+   */
+  reactions?: Record<string, number>;
 };
 
 export type FeedPost = {
@@ -215,7 +236,33 @@ async function loadComments(): Promise<FeedComment[]> {
 
     const parsed = JSON.parse(raw);
 
-    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .filter(Boolean)
+      .map((comment: FeedComment) => ({
+        ...comment,
+        text: typeof comment.text === "string" ? comment.text : "",
+        likedBy: Array.isArray(comment.likedBy)
+          ? comment.likedBy.filter(
+              (value): value is string =>
+                typeof value === "string" && value.trim().length > 0,
+            )
+          : [],
+        reactions:
+          comment.reactions &&
+          typeof comment.reactions === "object" &&
+          !Array.isArray(comment.reactions)
+            ? Object.fromEntries(
+                Object.entries(comment.reactions).filter(
+                  ([emoji, count]) =>
+                    typeof emoji === "string" &&
+                    typeof count === "number" &&
+                    count > 0,
+                ),
+              )
+            : {},
+      }));
   } catch {
     return [];
   }
@@ -513,6 +560,7 @@ export async function addFeedComment(input: {
   postId: string;
   author: FeedCreator;
   text: string;
+  parentId?: string;
 }): Promise<FeedComment | null> {
   const text = input.text.trim();
 
@@ -533,6 +581,9 @@ export async function addFeedComment(input: {
     author: input.author,
     text,
     createdAt: new Date().toISOString(),
+    parentId: input.parentId,
+    likedBy: [],
+    reactions: {},
   };
 
   await saveComments([...comments, comment]);
@@ -548,6 +599,145 @@ export async function addFeedComment(input: {
   await saveFeedPosts(updatedPosts);
 
   return comment;
+}
+
+export async function toggleFeedCommentLike(
+  commentId: string,
+  userId: string,
+): Promise<FeedComment | null> {
+  if (!commentId || !userId) return null;
+
+  const comments = await loadComments();
+  const index = comments.findIndex((comment) => comment.id === commentId);
+
+  if (index === -1) return null;
+
+  const current = new Set(comments[index].likedBy ?? []);
+
+  if (current.has(userId)) {
+    current.delete(userId);
+  } else {
+    current.add(userId);
+  }
+
+  const updatedComment: FeedComment = {
+    ...comments[index],
+    likedBy: Array.from(current),
+  };
+
+  const updated = [...comments];
+  updated[index] = updatedComment;
+
+  await saveComments(updated);
+
+  return updatedComment;
+}
+
+export async function getFeedCommentReaction(
+  commentId: string,
+  userId: string,
+): Promise<string | undefined> {
+  if (!commentId || !userId) return undefined;
+
+  const reactionsKey = `${COMMENTS_STORAGE_KEY}:reactions`;
+
+  try {
+    const raw = await AsyncStorage.getItem(reactionsKey);
+
+    if (!raw) return undefined;
+
+    const parsed = JSON.parse(raw);
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return undefined;
+    }
+
+    const key = `${userId}:${commentId}`;
+    const reaction = (parsed as Record<string, unknown>)[key];
+
+    return typeof reaction === "string" && reaction.trim()
+      ? reaction
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function toggleFeedCommentReaction(
+  commentId: string,
+  userId: string,
+  emoji: string,
+): Promise<FeedComment | null> {
+  if (!commentId || !userId || !emoji.trim()) return null;
+
+  const comments = await loadComments();
+  const index = comments.findIndex((comment) => comment.id === commentId);
+
+  if (index === -1) return null;
+
+  const reactionsKey = `${COMMENTS_STORAGE_KEY}:reactions`;
+  let userReactions: Record<string, string> = {};
+
+  try {
+    const rawUserReactions = await AsyncStorage.getItem(reactionsKey);
+
+    if (rawUserReactions) {
+      const parsed = JSON.parse(rawUserReactions);
+
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        userReactions = parsed as Record<string, string>;
+      }
+    }
+  } catch {
+    userReactions = {};
+  }
+
+  const reactionUserKey = `${userId}:${commentId}`;
+  const existingUserReaction = userReactions[reactionUserKey];
+
+  const nextReactions = {
+    ...(comments[index].reactions ?? {}),
+  };
+
+  if (existingUserReaction === emoji) {
+    delete userReactions[reactionUserKey];
+
+    nextReactions[emoji] = Math.max(
+      0,
+      (nextReactions[emoji] ?? 0) - 1,
+    );
+  } else {
+    if (existingUserReaction) {
+      nextReactions[existingUserReaction] = Math.max(
+        0,
+        (nextReactions[existingUserReaction] ?? 0) - 1,
+      );
+    }
+
+    nextReactions[emoji] = (nextReactions[emoji] ?? 0) + 1;
+    userReactions[reactionUserKey] = emoji;
+  }
+
+  await AsyncStorage.setItem(
+    reactionsKey,
+    JSON.stringify(userReactions),
+  );
+
+  const updatedComment: FeedComment = {
+    ...comments[index],
+    reactions: Object.fromEntries(
+      Object.entries(nextReactions).filter(
+        ([, count]) => typeof count === "number" && count > 0,
+      ),
+    ),
+  };
+
+  const updated = [...comments];
+  updated[index] = updatedComment;
+
+  await saveComments(updated);
+
+  return updatedComment;
 }
 
 const FOLLOWS_STORAGE_KEY = "@nexchat/feed/follows/v1";

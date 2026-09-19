@@ -46,6 +46,9 @@ import {
   getFeedComments,
   addFeedComment,
   FeedComment,
+  toggleFeedCommentLike,
+  toggleFeedCommentReaction,
+  getFeedCommentReaction,
   toggleFeedPostPinned,
   toggleFeedPostNotifications,
   archiveFeedPost,
@@ -110,11 +113,22 @@ function getCreator(identity: unknown): FeedCreator {
     "photoUrl",
   ]);
 
+  const bio = identityValue(identity, ["bio"]);
+  const website = identityValue(identity, ["website"]);
+  const location = identityValue(identity, ["location"]);
+  const pronouns = identityValue(identity, ["pronouns"]);
+  const joinedAt = identityValue(identity, ["joinedAt"]);
+
   return {
     id,
     name,
     username,
     avatarUri,
+    bio,
+    website,
+    location,
+    pronouns,
+    joinedAt,
   };
 }
 
@@ -150,11 +164,13 @@ function FeedMediaCarousel({
   theme,
   isActive = false,
   onVideoEnd,
+  onDoubleTapLike,
 }: {
   attachments: FeedAttachment[];
   theme: FeedTheme;
   isActive?: boolean;
   onVideoEnd?: () => boolean;
+  onDoubleTapLike?: () => void;
 }) {
   const [page, setPage] = useState(0);
   const [carouselWidth, setCarouselWidth] = useState(0);
@@ -211,6 +227,21 @@ function FeedMediaCarousel({
         pagingEnabled
         showsHorizontalScrollIndicator={false}
         onScroll={handleScroll}
+        onMomentumScrollEnd={(event) => {
+          const offsetX = event.nativeEvent.contentOffset.x;
+          const containerWidth = event.nativeEvent.layoutMeasurement.width;
+
+          if (!containerWidth) return;
+
+          const finalPage = Math.round(offsetX / containerWidth);
+
+          if (
+            finalPage >= 0 &&
+            finalPage < attachments.length
+          ) {
+            setPage(finalPage);
+          }
+        }}
         scrollEventThrottle={16}
       >
         {attachments.map((item, index) => (
@@ -221,12 +252,17 @@ function FeedMediaCarousel({
               { width: carouselWidth || "100%" },
             ]}
           >
-            <FeedMedia
-              attachment={item}
-              theme={theme}
-              isActive={isActive && page === index}
-              onVideoEnd={() => handleVideoEnd(index)}
-            />
+            {isActive && page !== index && item.kind === "video" ? (
+              <View style={[styles.feedVideo, { backgroundColor: theme.bg }]} />
+            ) : (
+              <FeedMedia
+                attachment={item}
+                theme={theme}
+                isActive={isActive && page === index}
+                onVideoEnd={() => handleVideoEnd(index)}
+                onDoubleTapLike={onDoubleTapLike}
+              />
+            )}
           </View>
         ))}
       </ScrollView>
@@ -265,11 +301,13 @@ function FeedMedia({
   theme,
   isActive = false,
   onVideoEnd,
+  onDoubleTapLike,
 }: {
   attachment: FeedAttachment;
   theme: FeedTheme;
   isActive?: boolean;
   onVideoEnd?: () => boolean;
+  onDoubleTapLike?: () => void;
 }) {
   const kind =
     attachment.kind ??
@@ -317,6 +355,7 @@ function FeedMedia({
         theme={theme}
         autoPlay={isActive}
         onVideoEnd={onVideoEnd}
+        onDoubleTapLike={onDoubleTapLike}
       />
     );
   }
@@ -333,11 +372,13 @@ function FeedVideo({
   theme,
   autoPlay = false,
   onVideoEnd,
+  onDoubleTapLike,
 }: {
   attachment: FeedAttachment;
   theme: FeedTheme;
   autoPlay?: boolean;
   onVideoEnd?: () => boolean;
+  onDoubleTapLike?: () => void;
 }) {
   const player = useVideoPlayer(attachment.uri, (videoPlayer) => {
     videoPlayer.loop = false;
@@ -346,6 +387,17 @@ function FeedVideo({
 
   const [playing, setPlaying] = useState(false);
   const [manualPaused, setManualPaused] = useState(false);
+  const singleTapTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTapRef = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      if (singleTapTimeoutRef.current) {
+        clearTimeout(singleTapTimeoutRef.current);
+        singleTapTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const subscription = player.addListener(
@@ -534,12 +586,23 @@ function FeedVideo({
       ]}
     >
       <View style={styles.feedVideoStage}>
-        <VideoView
-          player={player}
-          style={styles.feedVideo}
-          contentFit="contain"
-          nativeControls={false}
-        />
+        {autoPlay || manualPaused ? (
+          <VideoView
+            player={player}
+            style={styles.feedVideo}
+            contentFit="contain"
+            nativeControls={false}
+          />
+        ) : (
+          <View
+            style={[
+              styles.feedVideo,
+              {
+                backgroundColor: theme.bg,
+              },
+            ]}
+          />
+        )}
 
         {attachment.overlayText?.trim() ? (
           <View
@@ -563,7 +626,30 @@ function FeedVideo({
           accessibilityLabel={
             playing ? "Pause video" : "Play video"
           }
-          onPress={togglePlayback}
+          onPress={() => {
+            const now = Date.now();
+            const sinceLastTap = now - lastTapRef.current;
+
+            if (sinceLastTap < 280) {
+              lastTapRef.current = 0;
+
+              if (singleTapTimeoutRef.current) {
+                clearTimeout(singleTapTimeoutRef.current);
+                singleTapTimeoutRef.current = null;
+              }
+
+              onDoubleTapLike?.();
+              return;
+            }
+
+            lastTapRef.current = now;
+
+            singleTapTimeoutRef.current = setTimeout(() => {
+              lastTapRef.current = 0;
+              singleTapTimeoutRef.current = null;
+              togglePlayback();
+            }, 280);
+          }}
           style={StyleSheet.absoluteFillObject}
         >
           {!playing ? (
@@ -817,6 +903,11 @@ function PostCard({
             theme={theme}
             isActive={isActive}
             onVideoEnd={onVideoEnd}
+            onDoubleTapLike={
+              post.likedBy?.includes(userId)
+                ? undefined
+                : handleLike
+            }
           />
         </View>
       ) : attachments.length === 1 ? (
@@ -826,6 +917,11 @@ function PostCard({
             theme={theme}
             isActive={isActive}
             onVideoEnd={onVideoEnd}
+            onDoubleTapLike={
+              post.likedBy?.includes(userId)
+                ? undefined
+                : handleLike
+            }
           />
         </View>
       ) : null}
@@ -915,6 +1011,11 @@ export function FeedScreen({
   const [commentText, setCommentText] = useState("");
   const [commentsLoading, setCommentsLoading] = useState(false);
   const [commentSubmitting, setCommentSubmitting] = useState(false);
+  const [replyingTo, setReplyingTo] = useState<FeedComment | null>(null);
+  const [reactionCommentId, setReactionCommentId] = useState<string | null>(null);
+  const [commentUserReactions, setCommentUserReactions] = useState<
+    Record<string, string>
+  >({});
   const [loading, setLoading] = useState(true);
   const [composerOpen, setComposerOpen] = useState(false);
   const [editingPost, setEditingPost] = useState<FeedPost | null>(null);
@@ -1311,12 +1412,91 @@ export function FeedScreen({
   const openComments = useCallback(async (post: FeedPost) => {
     setActiveCommentPost(post);
     setCommentText("");
+    setReplyingTo(null);
+    setReactionCommentId(null);
+    setCommentUserReactions({});
     setCommentsLoading(true);
 
     try {
-      setComments(await getFeedComments(post.id));
+      const loadedComments = await getFeedComments(post.id);
+      setComments(loadedComments);
+
+      const reactions: Record<string, string> = {};
+
+      for (const comment of loadedComments) {
+        const reaction = await getFeedCommentReaction(
+          comment.id,
+          creator.id,
+        );
+
+        if (reaction) {
+          reactions[comment.id] = reaction;
+        }
+      }
+
+      setCommentUserReactions(reactions);
     } finally {
       setCommentsLoading(false);
+    }
+  }, [creator.id]);
+
+  const handleCommentLike = useCallback(
+    async (commentId: string) => {
+      const updated = await toggleFeedCommentLike(
+        commentId,
+        creator.id,
+      );
+
+      if (!updated) return;
+
+      setComments((current) =>
+        current.map((comment) =>
+          comment.id === updated.id ? updated : comment,
+        ),
+      );
+    },
+    [creator.id],
+  );
+
+  const handleCommentReaction = useCallback(
+    async (commentId: string, emoji: string) => {
+      const updated = await toggleFeedCommentReaction(
+        commentId,
+        creator.id,
+        emoji,
+      );
+
+      if (!updated) return;
+
+      setComments((current) =>
+        current.map((comment) =>
+          comment.id === updated.id ? updated : comment,
+        ),
+      );
+
+      setCommentUserReactions((current) => {
+        const next = { ...current };
+
+        if (next[commentId] === emoji) {
+          delete next[commentId];
+        } else {
+          next[commentId] = emoji;
+        }
+
+        return next;
+      });
+
+      setReactionCommentId(null);
+    },
+    [creator.id],
+  );
+
+  const handleCopyComment = useCallback(async (comment: FeedComment) => {
+    try {
+      await Clipboard.setStringAsync(comment.text);
+      Alert.alert("Copied", "Comment copied to your clipboard.");
+    } catch {
+      Alert.alert("Copy failed", "NexChat could not copy this comment.");
     }
   }, []);
 
@@ -1326,19 +1506,22 @@ export function FeedScreen({
     }
 
     setCommentSubmitting(true);
-
     setPublishing(true);
+
     try {
       const comment = await addFeedComment({
         postId: activeCommentPost.id,
         author: creator,
         text: commentText,
+        parentId: replyingTo?.id,
       });
 
       if (!comment) return;
 
       setComments((current) => [...current, comment]);
       setCommentText("");
+      setReplyingTo(null);
+      setReactionCommentId(null);
 
       setPosts((current) =>
         current.map((post) =>
@@ -1346,7 +1529,7 @@ export function FeedScreen({
             ? {
                 ...post,
                 commentCount: (post.commentCount ?? 0) + 1,
-    }
+              }
             : post,
         ),
       );
@@ -1356,17 +1539,19 @@ export function FeedScreen({
           ? {
               ...current,
               commentCount: (current.commentCount ?? 0) + 1,
-              }
+            }
           : current,
       );
     } finally {
       setCommentSubmitting(false);
-            }
+      setPublishing(false);
+    }
   }, [
     activeCommentPost,
     commentText,
     commentSubmitting,
     creator,
+    replyingTo,
   ]);
 
   const refresh = useCallback(async () => {
@@ -2282,12 +2467,17 @@ export function FeedScreen({
         onRequestClose={() => setActiveCommentPost(null)}
       >
         <View style={styles.modalBackdrop}>
-          <View
-            style={[
-              styles.commentsSheet,
-              { backgroundColor: theme.card },
-            ]}
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+            keyboardVerticalOffset={0}
+            style={styles.commentsKeyboard}
           >
+            <View
+              style={[
+                styles.commentsSheet,
+                { backgroundColor: theme.card },
+              ]}
+            >
             <View style={styles.commentsHandle} />
 
             <View style={styles.commentsHeader}>
@@ -2319,118 +2509,58 @@ export function FeedScreen({
               </Pressable>
             </View>
 
-            {commentsLoading ? (
-              <View style={styles.commentsLoading}>
-                <ActivityIndicator color={theme.brand} />
-              </View>
-            ) : (
-              <ScrollView
-                style={styles.commentsList}
-                contentContainerStyle={styles.commentsListContent}
-                keyboardShouldPersistTaps="handled"
-                showsVerticalScrollIndicator={false}
+            {replyingTo ? (
+              <View
+                style={[
+                  styles.replyIndicator,
+                  {
+                    backgroundColor: theme.bg,
+                    borderTopColor: theme.line,
+                  },
+                ]}
               >
-                {comments.length === 0 ? (
-                  <View style={styles.emptyComments}>
-                    <View
-                      style={[
-                        styles.emptyCommentsIcon,
-                        { backgroundColor: theme.bg },
-                      ]}
-                    >
-                      <Text style={styles.emptyCommentsIconText}>💬</Text>
-                    </View>
+                <View style={styles.replyIndicatorText}>
+                  <Text
+                    style={[
+                      styles.replyIndicatorTitle,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    Replying to{" "}
+                    {replyingTo.author.username
+                      ? `@${replyingTo.author.username}`
+                      : replyingTo.author.name}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.replyIndicatorBody,
+                      { color: theme.muted },
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {replyingTo.text}
+                  </Text>
+                </View>
 
-                    <Text
-                      style={[
-                        styles.emptyCommentsTitle,
-                        { color: theme.ink },
-                      ]}
-                    >
-                      No comments yet
-                    </Text>
-
-                    <Text
-                      style={[
-                        styles.emptyCommentsText,
-                        { color: theme.muted },
-                      ]}
-                    >
-                      Start the conversation by leaving the first comment.
-                    </Text>
-                  </View>
-                ) : (
-                  comments.map((comment) => (
-                    <View key={comment.id} style={styles.commentRow}>
-                      <View
-                        style={[
-                          styles.commentAvatar,
-                          { backgroundColor: theme.brand },
-                        ]}
-                      >
-                        <Text style={styles.commentAvatarText}>
-                          {(comment.author.name || "?")
-                            .trim()
-                            .charAt(0)
-                            .toUpperCase()}
-                        </Text>
-                      </View>
-
-                      <View
-                        style={[
-                          styles.commentBubble,
-                          { backgroundColor: theme.bg },
-                        ]}
-                      >
-                        <View style={styles.commentAuthorRow}>
-                          <View style={styles.commentAuthorInfo}>
-                            <Text
-                              style={[
-                                styles.commentAuthor,
-                                { color: theme.ink },
-                              ]}
-                              numberOfLines={1}
-                            >
-                              {comment.author.name}
-                            </Text>
-
-                            {comment.author.username ? (
-                              <Text
-                                style={[
-                                  styles.commentUsername,
-                                  { color: theme.muted },
-                                ]}
-                                numberOfLines={1}
-                              >
-                                @{comment.author.username}
-                              </Text>
-                            ) : null}
-                          </View>
-
-                          <Text
-                            style={[
-                              styles.commentTimestamp,
-                              { color: theme.muted },
-                            ]}
-                          >
-                            {new Date(comment.createdAt).toLocaleString()}
-                          </Text>
-                        </View>
-
-                        <Text
-                          style={[
-                            styles.commentBody,
-                            { color: theme.ink },
-                          ]}
-                        >
-                          {comment.text}
-                        </Text>
-                      </View>
-                    </View>
-                  ))
-                )}
-              </ScrollView>
-            )}
+                <Pressable
+                  onPress={() => setReplyingTo(null)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Cancel reply"
+                  style={({ pressed }) => ({
+                    opacity: pressed ? 0.55 : 1,
+                  })}
+                >
+                  <Text
+                    style={[
+                      styles.replyIndicatorClose,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    ×
+                  </Text>
+                </Pressable>
+              </View>
+            ) : null}
 
             <View
               style={[
@@ -2485,9 +2615,360 @@ export function FeedScreen({
                 )}
               </Pressable>
             </View>
+
+            {commentsLoading ? (
+              <View style={styles.commentsLoading}>
+                <ActivityIndicator color={theme.brand} />
+              </View>
+            ) : (
+              <ScrollView
+                style={styles.commentsList}
+                contentContainerStyle={styles.commentsListContent}
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+              >
+                {comments.length === 0 ? (
+                  <View style={styles.emptyComments}>
+                    <View
+                      style={[
+                        styles.emptyCommentsIcon,
+                        { backgroundColor: theme.bg },
+                      ]}
+                    >
+                      <Text style={styles.emptyCommentsIconText}>💬</Text>
+                    </View>
+
+                    <Text
+                      style={[
+                        styles.emptyCommentsTitle,
+                        { color: theme.ink },
+                      ]}
+                    >
+                      No comments yet
+                    </Text>
+
+                    <Text
+                      style={[
+                        styles.emptyCommentsText,
+                        { color: theme.muted },
+                      ]}
+                    >
+                      Start the conversation by leaving the first comment.
+                    </Text>
+                  </View>
+                ) : (
+                  comments
+                    .filter((comment) => !comment.parentId)
+                    .map((comment) => {
+                      const renderComment = (
+                        currentComment: FeedComment,
+                        depth = 0,
+                      ): React.ReactNode => {
+                        const replies = comments.filter(
+                          (child) => child.parentId === currentComment.id,
+                        );
+
+                        const likeCount =
+                          currentComment.likedBy?.length ?? 0;
+
+                        const reactionEntries = Object.entries(
+                          currentComment.reactions ?? {},
+                        ).filter(([, count]) => count > 0);
+
+                        const selectedReaction =
+                          commentUserReactions[currentComment.id];
+
+                        return (
+                          <React.Fragment key={currentComment.id}>
+                            <View
+                              style={[
+                                styles.commentRow,
+                                depth > 0 && styles.commentReplyRow,
+                              ]}
+                            >
+                              <Pressable
+                                onPress={() =>
+                                  handleOpenProfile(currentComment.author)
+                                }
+                                accessibilityRole="button"
+                                accessibilityLabel={`Open ${currentComment.author.name}'s profile`}
+                                style={({ pressed }) => ({
+                                  opacity: pressed ? 0.65 : 1,
+                                })}
+                              >
+                                <View
+                                  style={[
+                                    styles.commentAvatar,
+                                    { backgroundColor: theme.brand },
+                                  ]}
+                                >
+                                  <Text style={styles.commentAvatarText}>
+                                    {(currentComment.author.name || "?")
+                                      .trim()
+                                      .charAt(0)
+                                      .toUpperCase()}
+                                  </Text>
+                                </View>
+                              </Pressable>
+
+                              <View
+                                style={[
+                                  styles.commentBubble,
+                                  { backgroundColor: theme.bg },
+                                ]}
+                              >
+                                <View style={styles.commentAuthorRow}>
+                                  <View style={styles.commentAuthorInfo}>
+                                    <Pressable
+                                      onPress={() =>
+                                        handleOpenProfile(
+                                          currentComment.author,
+                                        )
+                                      }
+                                      accessibilityRole="button"
+                                      accessibilityLabel={`Open ${currentComment.author.name}'s profile`}
+                                    >
+                                      <Text
+                                        style={[
+                                          styles.commentAuthor,
+                                          { color: theme.ink },
+                                        ]}
+                                        numberOfLines={1}
+                                      >
+                                        {currentComment.author.name}
+                                      </Text>
+                                    </Pressable>
+
+                                    {currentComment.author.username ? (
+                                      <Text
+                                        style={[
+                                          styles.commentUsername,
+                                          { color: theme.muted },
+                                        ]}
+                                        numberOfLines={1}
+                                      >
+                                        @{currentComment.author.username}
+                                      </Text>
+                                    ) : null}
+                                  </View>
+
+                                  <Text
+                                    style={[
+                                      styles.commentTimestamp,
+                                      { color: theme.muted },
+                                    ]}
+                                  >
+                                    {new Date(
+                                      currentComment.createdAt,
+                                    ).toLocaleString()}
+                                  </Text>
+                                </View>
+
+                                <Text
+                                  style={[
+                                    styles.commentBody,
+                                    { color: theme.ink },
+                                  ]}
+                                >
+                                  {currentComment.text}
+                                </Text>
+
+                                <View style={styles.commentActions}>
+                                  <Pressable
+                                    onPress={() =>
+                                      void handleCommentLike(
+                                        currentComment.id,
+                                      )
+                                    }
+                                    style={({ pressed }) => [
+                                      styles.commentAction,
+                                      {
+                                        opacity: pressed ? 0.55 : 1,
+                                      },
+                                    ]}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.commentActionText,
+                                        {
+                                          color:
+                                            currentComment.likedBy?.includes(
+                                              creator.id,
+                                            )
+                                              ? theme.brand
+                                              : theme.muted,
+                                        },
+                                      ]}
+                                    >
+                                      {currentComment.likedBy?.includes(
+                                        creator.id,
+                                      )
+                                        ? "♥"
+                                        : "♡"}{" "}
+                                      Like
+                                      {likeCount ? ` ${likeCount}` : ""}
+                                    </Text>
+                                  </Pressable>
+
+                                  <Pressable
+                                    onPress={() =>
+                                      setReactionCommentId((current) =>
+                                        current === currentComment.id
+                                          ? null
+                                          : currentComment.id,
+                                      )
+                                    }
+                                    style={({ pressed }) => [
+                                      styles.commentAction,
+                                      {
+                                        opacity: pressed ? 0.55 : 1,
+                                      },
+                                    ]}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.commentActionText,
+                                        { color: theme.muted },
+                                      ]}
+                                    >
+                                      {selectedReaction ?? "☺"} React
+                                    </Text>
+                                  </Pressable>
+
+                                  <Pressable
+                                    onPress={() => {
+                                      setReactionCommentId(null);
+                                      setReplyingTo(currentComment);
+                                    }}
+                                    hitSlop={8}
+                                    style={({ pressed }) => [
+                                      styles.commentAction,
+                                      {
+                                        opacity: pressed ? 0.55 : 1,
+                                      },
+                                    ]}
+                                    accessibilityRole="button"
+                                    accessibilityLabel={`Reply to ${currentComment.author.name}`}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.commentActionText,
+                                        { color: theme.muted },
+                                      ]}
+                                    >
+                                      ↩ Reply
+                                    </Text>
+                                  </Pressable>
+
+                                  <Pressable
+                                    onPress={() =>
+                                      void handleCopyComment(currentComment)
+                                    }
+                                    style={({ pressed }) => [
+                                      styles.commentAction,
+                                      {
+                                        opacity: pressed ? 0.55 : 1,
+                                      },
+                                    ]}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.commentActionText,
+                                        { color: theme.muted },
+                                      ]}
+                                    >
+                                      Copy
+                                    </Text>
+                                  </Pressable>
+                                </View>
+
+                                {reactionCommentId === currentComment.id ? (
+                                  <View
+                                    style={[
+                                      styles.reactionPicker,
+                                      {
+                                        backgroundColor: theme.card,
+                                        borderColor: theme.line,
+                                      },
+                                    ]}
+                                  >
+                                    {["❤️", "😂", "😮", "😢", "👍", "🔥"].map(
+                                      (emoji) => (
+                                        <Pressable
+                                          key={emoji}
+                                          onPress={() =>
+                                            void handleCommentReaction(
+                                              currentComment.id,
+                                              emoji,
+                                            )
+                                          }
+                                          style={({ pressed }) => [
+                                            styles.reactionButton,
+                                            {
+                                              backgroundColor:
+                                                pressed || selectedReaction === emoji
+                                                  ? theme.bg
+                                                  : "transparent",
+                                            },
+                                          ]}
+                                          accessibilityRole="button"
+                                          accessibilityLabel={`React ${emoji}`}
+                                        >
+                                          <Text
+                                            style={styles.reactionEmoji}
+                                          >
+                                            {emoji}
+                                          </Text>
+                                        </Pressable>
+                                      ),
+                                    )}
+                                  </View>
+                                ) : null}
+
+                                {reactionEntries.length > 0 ? (
+                                  <View style={styles.commentReactionCounts}>
+                                    {reactionEntries.map(([emoji, count]) => (
+                                      <Text
+                                        key={emoji}
+                                        style={[
+                                          styles.commentReactionCount,
+                                          {
+                                            color: theme.muted,
+                                            backgroundColor: theme.card,
+                                          },
+                                        ]}
+                                      >
+                                        {emoji} {count}
+                                      </Text>
+                                    ))}
+                                  </View>
+                                ) : null}
+                              </View>
+                            </View>
+
+                            {replies.length > 0
+                              ? replies.map((reply) =>
+                                  renderComment(
+                                    reply,
+                                    Math.min(depth + 1, 3),
+                                  ),
+                                )
+                              : null}
+                          </React.Fragment>
+                        );
+                      };
+
+                      return renderComment(comment);
+                    })
+                )}
+              </ScrollView>
+            )}
+
+
           </View>
-        </View>
-      </Modal>
+        </KeyboardAvoidingView>
+      </View>
+    </Modal>
 
       <Pressable
         onPress={() => {
@@ -3475,8 +3956,15 @@ const styles = StyleSheet.create({
     fontWeight: "800",
   },
 
+  commentsKeyboard: {
+    width: "100%",
+    flex: 1,
+    justifyContent: "flex-end",
+  },
+
   commentsSheet: {
     width: "100%",
+    height: "82%",
     maxHeight: "82%",
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
@@ -3533,13 +4021,13 @@ const styles = StyleSheet.create({
   },
 
   commentsLoading: {
-    minHeight: 240,
+    flex: 1,
     alignItems: "center",
     justifyContent: "center",
   },
 
   commentsList: {
-    flexGrow: 0,
+    flex: 1,
   },
 
   commentsListContent: {
@@ -3583,6 +4071,10 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-start",
     marginBottom: 12,
+  },
+
+  commentReplyRow: {
+    marginLeft: 34,
   },
 
   commentAuthorRow: {
@@ -3640,6 +4132,93 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
     marginTop: 5,
+  },
+
+  commentActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    marginTop: 8,
+    gap: 10,
+  },
+
+  commentAction: {
+    minHeight: 24,
+    justifyContent: "center",
+  },
+
+  commentActionText: {
+    fontSize: 11,
+    fontWeight: "700",
+  },
+
+  reactionPicker: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 18,
+    paddingHorizontal: 5,
+    paddingVertical: 4,
+    marginTop: 7,
+  },
+
+  reactionButton: {
+    width: 34,
+    height: 32,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  reactionEmoji: {
+    fontSize: 18,
+  },
+
+  commentReactionCounts: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 5,
+    marginTop: 7,
+  },
+
+  commentReactionCount: {
+    overflow: "hidden",
+    borderRadius: 12,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    fontSize: 10,
+    fontWeight: "700",
+  },
+
+  replyIndicator: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+
+  replyIndicatorText: {
+    flex: 1,
+    minWidth: 0,
+  },
+
+  replyIndicatorTitle: {
+    fontSize: 11,
+    fontWeight: "800",
+  },
+
+  replyIndicatorBody: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+
+  replyIndicatorClose: {
+    fontSize: 24,
+    lineHeight: 26,
+    paddingHorizontal: 8,
   },
 
   commentComposer: {

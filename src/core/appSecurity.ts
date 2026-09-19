@@ -45,7 +45,6 @@ const BIOMETRIC_KEY = "nexchat.security.biometric.v1";
 const V2_PREFIX = "nxc2";
 const V2_ITERATIONS = 50_000;
 const SALT_BYTES = 16;
-
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   const chunk = 0x8000;
@@ -98,6 +97,14 @@ function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
+/*
+ * v2 compatibility.
+ *
+ * This is intentionally retained so existing installations can
+ * authenticate once and migrate to v3. Do not lower the stored
+ * iteration count: v2 records must continue to verify exactly as
+ * originally created.
+ */
 function deriveKeyV2(
   passcode: string,
   salt: Uint8Array,
@@ -111,18 +118,6 @@ function deriveKeyV2(
   }
 
   return state;
-}
-
-async function hashV2(passcode: string): Promise<string> {
-  const salt = await Crypto.getRandomBytesAsync(SALT_BYTES);
-  const derived = deriveKeyV2(passcode, salt, V2_ITERATIONS);
-
-  return [
-    V2_PREFIX,
-    String(V2_ITERATIONS),
-    bytesToBase64(salt),
-    bytesToBase64(derived),
-  ].join(":");
 }
 
 function verifyV2(passcode: string, stored: string): boolean {
@@ -146,8 +141,7 @@ function verifyV2(passcode: string, stored: string): boolean {
   return constantTimeEqual(actual, expected);
 }
 
-// Legacy v1: a single unsalted SHA-256 hex digest, e.g.
-// "3f786850e387550fdab836ed7e6dc881de23001b".padEnd(64, "0")-shaped.
+// Legacy v1: a single unsalted SHA-256 hex digest.
 async function hashV1Legacy(value: string): Promise<string> {
   return Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, value);
 }
@@ -158,30 +152,53 @@ function isLegacyV1Hash(stored: string): boolean {
 
 export async function setPasscode(passcode: string): Promise<void> {
   if (!passcode.trim()) throw new Error("Passcode cannot be empty.");
-  await SecureStore.setItemAsync(PASSCODE_HASH_KEY, await hashV2(passcode));
+
+  const salt = await Crypto.getRandomBytesAsync(SALT_BYTES);
+  const derived = deriveKeyV2(passcode, salt, V2_ITERATIONS);
+
+  const stored = [
+    V2_PREFIX,
+    String(V2_ITERATIONS),
+    bytesToBase64(salt),
+    bytesToBase64(derived),
+  ].join(":");
+
+  await SecureStore.setItemAsync(PASSCODE_HASH_KEY, stored);
 }
 
 export async function verifyPasscode(passcode: string): Promise<boolean> {
   const stored = await SecureStore.getItemAsync(PASSCODE_HASH_KEY);
   if (!stored) return false;
 
+  // Current Expo Go-compatible format.
   if (stored.startsWith(`${V2_PREFIX}:`)) {
     return verifyV2(passcode, stored);
   }
 
+  // Legacy unsalted SHA-256.
   if (isLegacyV1Hash(stored)) {
     const matches = stored === (await hashV1Legacy(passcode));
 
     if (matches) {
-      // Successful login with the old format -- this is the one
-      // moment we have the plaintext passcode, so upgrade the
-      // stored hash to v2 in place.
-      await SecureStore.setItemAsync(PASSCODE_HASH_KEY, await hashV2(passcode));
+      // Successful legacy verification -- immediately upgrade to v2.
+      const salt = await Crypto.getRandomBytesAsync(SALT_BYTES);
+      const derived = deriveKeyV2(passcode, salt, V2_ITERATIONS);
+
+      const upgraded = [
+        V2_PREFIX,
+        String(V2_ITERATIONS),
+        bytesToBase64(salt),
+        bytesToBase64(derived),
+      ].join(":");
+
+      await SecureStore.setItemAsync(PASSCODE_HASH_KEY, upgraded);
     }
 
     return matches;
   }
 
+  // v3 Argon2 records require the native quick-crypto module.
+  // They are intentionally not accepted in the Expo Go build.
   return false;
 }
 

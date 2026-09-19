@@ -136,11 +136,17 @@ export type Conversation = {
 export type AppSettings = {
   theme: "system" | "light" | "dark";
 
+  messageColorMe?: string;
+  messageColorThem?: string;
+
   chatBackground:
     | "system"
     | "white"
     | "black"
     | "custom";
+
+  chatBackgroundColor?: string;
+  chatBackgroundImage?: string;
 
   backupEnabled: boolean;
 
@@ -162,6 +168,12 @@ export type AppSettings = {
   readReceipts: boolean;
   lastSeen: boolean;
   onlineStatus: boolean;
+
+  /**
+   * NexChat users explicitly marked as Best Friends.
+   * IDs refer to entries in the persisted contacts list.
+   */
+  bestFriendIds: string[];
 
   autoDownload: boolean;
   linkPreviews: boolean;
@@ -201,7 +213,11 @@ const demo: NexContact = {
 
 const defaults: AppSettings = {
   theme: "system",
+  messageColorMe: undefined,
+  messageColorThem: undefined,
   chatBackground: "system",
+  chatBackgroundColor: undefined,
+  chatBackgroundImage: undefined,
 
   backupEnabled: false,
   backupSchedule: "off",
@@ -210,6 +226,8 @@ const defaults: AppSettings = {
   readReceipts: true,
   lastSeen: true,
   onlineStatus: true,
+
+  bestFriendIds: [],
 
   autoDownload: true,
   linkPreviews: true,

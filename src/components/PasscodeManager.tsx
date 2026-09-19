@@ -39,18 +39,28 @@ export function PasscodeManager({ theme }: { theme: any }) {
 
   const startFlow = () => {
     setInput("");
+    setPendingNew("");
     setStep(hasCode ? "verifyCurrent" : "createNew");
   };
 
   const submitCurrent = async () => {
+    if (input.trim().length < 4) {
+      Alert.alert("Too short", "Use at least 4 characters.");
+      return;
+    }
+
     setBusy(true);
     try {
       const ok = await verifyPasscode(input);
+
       if (!ok) {
         Alert.alert("Incorrect passcode", "Please try again.");
+        setInput("");
         return;
       }
+
       setInput("");
+      setPendingNew("");
       setStep("createNew");
     } catch (e) {
       Alert.alert(
@@ -62,34 +72,33 @@ export function PasscodeManager({ theme }: { theme: any }) {
     }
   };
 
-  const submitNew = () => {
+  const saveNewPasscode = async () => {
     if (input.trim().length < 4) {
       Alert.alert("Too short", "Use at least 4 characters.");
       return;
     }
-    setPendingNew(input);
-    setInput("");
-    setStep("confirmNew");
-  };
 
-  const submitConfirm = async () => {
-    if (input !== pendingNew) {
-      Alert.alert("Passcodes don't match", "Try again.");
-      setInput("");
-      setStep("createNew");
+    if (pendingNew !== input) {
+      Alert.alert("Passcodes don't match", "Make sure both passcodes are identical.");
       return;
     }
+
     setBusy(true);
+
     try {
       await setPasscode(pendingNew);
       setHasCode(true);
-      reset();
-      Alert.alert("Passcode saved", "Your NexChat passcode has been updated.");
+
+      // Close and clear immediately after a successful save.
+      setInput("");
+      setPendingNew("");
+      setStep("closed");
     } catch (e) {
       Alert.alert(
         "Couldn't save passcode",
         e instanceof Error ? e.message : "Something went wrong."
       );
+    } finally {
       setBusy(false);
     }
   };
@@ -114,12 +123,15 @@ export function PasscodeManager({ theme }: { theme: any }) {
 
   const showRecovery = async () => {
     const code = await getRecoveryCode();
+
     Alert.alert(
       "Recovery code",
       "Keep this safe. You can use it to reset your passcode if you forget it:\n\n" +
         code
     );
   };
+
+  const creatingNew = step === "createNew";
 
   return (
     <View>
@@ -128,14 +140,17 @@ export function PasscodeManager({ theme }: { theme: any }) {
         style={[styles.row, { borderColor: theme.line }]}
       >
         <Text style={styles.rowIcon}>🔑</Text>
+
         <View style={{ flex: 1 }}>
           <Text style={[styles.rowTitle, { color: theme.ink }]}>
             App passcode
           </Text>
+
           <Text style={{ color: theme.muted, fontSize: 12 }}>
             {hasCode ? "Change your passcode" : "Create a passcode"}
           </Text>
         </View>
+
         <Text style={{ color: theme.muted, fontSize: 20 }}>›</Text>
       </TouchableOpacity>
 
@@ -145,6 +160,7 @@ export function PasscodeManager({ theme }: { theme: any }) {
           style={[styles.row, { borderColor: theme.line }]}
         >
           <Text style={styles.rowIcon}>🗑</Text>
+
           <View style={{ flex: 1 }}>
             <Text style={[styles.rowTitle, { color: theme.ink }]}>
               Remove passcode
@@ -158,10 +174,12 @@ export function PasscodeManager({ theme }: { theme: any }) {
         style={[styles.row, { borderColor: theme.line }]}
       >
         <Text style={styles.rowIcon}>🆘</Text>
+
         <View style={{ flex: 1 }}>
           <Text style={[styles.rowTitle, { color: theme.ink }]}>
             View recovery code
           </Text>
+
           <Text style={{ color: theme.muted, fontSize: 12 }}>
             Use this if you forget your passcode
           </Text>
@@ -178,44 +196,93 @@ export function PasscodeManager({ theme }: { theme: any }) {
           <View style={[styles.dialog, { backgroundColor: theme.card }]}>
             <Text style={[styles.dialogTitle, { color: theme.ink }]}>
               {step === "verifyCurrent" && "Enter current passcode"}
-              {step === "createNew" &&
-                (hasCode ? "Enter new passcode" : "Create a passcode")}
-              {step === "confirmNew" && "Confirm new passcode"}
+              {creatingNew &&
+                (hasCode ? "Create new passcode" : "Create a passcode")}
             </Text>
 
-            <TextInput
-              value={input}
-              onChangeText={setInput}
-              secureTextEntry
-              autoFocus
-              editable={!busy}
-              placeholder="Passcode"
-              placeholderTextColor={theme.muted}
-              style={[
-                styles.input,
-                { color: theme.ink, borderColor: theme.line },
-              ]}
-            />
+            {step === "verifyCurrent" ? (
+              <>
+                <TextInput
+                  value={input}
+                  onChangeText={setInput}
+                  secureTextEntry
+                  autoFocus
+                  editable={!busy}
+                  placeholder="Current passcode"
+                  placeholderTextColor={theme.muted}
+                  style={[
+                    styles.input,
+                    { color: theme.ink, borderColor: theme.line },
+                  ]}
+                />
+
+                <TouchableOpacity
+                  disabled={busy}
+                  onPress={submitCurrent}
+                  style={styles.actionButton}
+                >
+                  <Text style={styles.actionText}>
+                    {busy ? "Checking..." : "Continue"}
+                  </Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <Text style={[styles.fieldLabel, { color: theme.muted }]}>
+                  Passcode
+                </Text>
+
+                <TextInput
+                  value={pendingNew}
+                  onChangeText={setPendingNew}
+                  secureTextEntry
+                  autoFocus
+                  editable={!busy}
+                  placeholder="Enter passcode"
+                  placeholderTextColor={theme.muted}
+                  style={[
+                    styles.input,
+                    { color: theme.ink, borderColor: theme.line },
+                  ]}
+                />
+
+                <Text style={[styles.fieldLabel, { color: theme.muted }]}>
+                  Confirm passcode
+                </Text>
+
+                <TextInput
+                  value={input}
+                  onChangeText={setInput}
+                  secureTextEntry
+                  editable={!busy}
+                  placeholder="Enter passcode again"
+                  placeholderTextColor={theme.muted}
+                  style={[
+                    styles.input,
+                    { color: theme.ink, borderColor: theme.line },
+                  ]}
+                />
+
+                <TouchableOpacity
+                  disabled={busy}
+                  onPress={saveNewPasscode}
+                  style={styles.actionButton}
+                >
+                  <Text style={styles.actionText}>
+                    {busy ? "Saving..." : "Set Passcode"}
+                  </Text>
+                </TouchableOpacity>
+              </>
+            )}
 
             <TouchableOpacity
-              onPress={() => {
-                if (step === "verifyCurrent") submitCurrent();
-                else if (step === "createNew") submitNew();
-                else if (step === "confirmNew") submitConfirm();
-              }}
               disabled={busy}
-              style={[
-                styles.button,
-                { backgroundColor: theme.brand, opacity: busy ? 0.6 : 1 },
-              ]}
+              onPress={reset}
+              style={styles.cancelButton}
             >
-              <Text style={{ color: "white", fontWeight: "800" }}>
-                {busy ? "Please wait…" : "Continue"}
+              <Text style={[styles.cancelText, { color: theme.muted }]}>
+                Cancel
               </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity onPress={reset} disabled={busy} style={styles.cancelButton}>
-              <Text style={{ color: theme.muted }}>Cancel</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -228,59 +295,73 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 12,
     borderBottomWidth: 1,
-    gap: 12,
   },
-
   rowIcon: {
-    fontSize: 20,
-    width: 26,
+    fontSize: 21,
+    width: 38,
     textAlign: "center",
+    marginRight: 10,
   },
-
   rowTitle: {
     fontSize: 15,
-    fontWeight: "700",
+    fontWeight: "800",
   },
-
   overlay: {
     flex: 1,
-    backgroundColor: "#00000066",
+    backgroundColor: "rgba(0,0,0,0.55)",
     alignItems: "center",
     justifyContent: "center",
-    padding: 24,
+    padding: 22,
   },
-
   dialog: {
     width: "100%",
-    borderRadius: 16,
-    padding: 16,
+    maxWidth: 430,
+    borderRadius: 18,
+    padding: 20,
   },
-
   dialogTitle: {
-    fontSize: 16,
+    fontSize: 20,
+    fontWeight: "900",
+    marginBottom: 18,
+  },
+  fieldLabel: {
+    fontSize: 12,
     fontWeight: "800",
-    marginBottom: 12,
+    marginBottom: 6,
   },
-
   input: {
+    width: "100%",
+    minHeight: 50,
     borderWidth: 1,
-    borderRadius: 10,
-    padding: 10,
+    borderRadius: 12,
+    paddingHorizontal: 14,
     fontSize: 16,
-    marginBottom: 12,
+    marginBottom: 14,
   },
-
-  button: {
-    borderRadius: 10,
-    paddingVertical: 12,
+  actionButton: {
+    minHeight: 50,
+    borderRadius: 12,
     alignItems: "center",
-    marginBottom: 8,
+    justifyContent: "center",
+    backgroundColor: "#111111",
+    marginTop: 4,
   },
-
+  actionText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "900",
+  },
   cancelButton: {
+    minHeight: 44,
     alignItems: "center",
-    paddingVertical: 8,
+    justifyContent: "center",
+    marginTop: 8,
+  },
+  cancelText: {
+    fontSize: 14,
+    fontWeight: "800",
   },
 });

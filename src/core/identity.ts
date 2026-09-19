@@ -6,6 +6,11 @@ export type Identity = {
   displayName: string;
   username: string;
   avatarUri?: string;
+  bio?: string;
+  website?: string;
+  location?: string;
+  pronouns?: string;
+  joinedAt?: string;
 };
 
 const KEY = "nexchat.identity.v1";
@@ -32,6 +37,11 @@ export async function initIdentity() {
         id: makeId(),
         displayName: "NexChat User",
         username: "user",
+        bio: "",
+        website: "",
+        location: "",
+        pronouns: "",
+        joinedAt: new Date().toISOString(),
       })
     );
   }
@@ -41,7 +51,14 @@ export async function getIdentity(): Promise<Identity> {
   const raw = await AsyncStorage.getItem(KEY);
 
   if (raw) {
-    return JSON.parse(raw);
+    const identity = JSON.parse(raw) as Identity;
+
+    if (!identity.joinedAt) {
+      identity.joinedAt = new Date().toISOString();
+      await AsyncStorage.setItem(KEY, JSON.stringify(identity));
+    }
+
+    return identity;
   }
 
   await initIdentity();

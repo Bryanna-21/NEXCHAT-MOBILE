@@ -21,7 +21,6 @@ const allowedMimePrefixes = [
 ];
 
 const allowedMimeTypes = new Set([
-  "application/pdf",
   "text/plain",
   "application/zip",
   "application/json",
