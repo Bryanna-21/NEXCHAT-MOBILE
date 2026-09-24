@@ -22,8 +22,22 @@ export interface TransportEnvelope {
   queueId?: string;
 }
 
+export type TransportEventKind =
+  | "typing-start"
+  | "typing-stop";
+
+export interface TransportEvent {
+  id: string;
+  kind: TransportEventKind;
+  senderId: string;
+  recipientId: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
 export interface TransportResult {
   transport: TransportKind;
+  accepted: boolean;
   delivered: boolean;
   queued: boolean;
   error?: string;
@@ -39,6 +53,14 @@ export interface NexTransport {
   send(
     envelope: TransportEnvelope,
   ): Promise<TransportResult>;
+
+  /**
+   * Ephemeral realtime events such as typing indicators.
+   * Transports that support realtime peer events implement this.
+   */
+  sendEvent?(
+    event: TransportEvent,
+  ): Promise<boolean>;
 }
 
 export function createTransportEnvelope(

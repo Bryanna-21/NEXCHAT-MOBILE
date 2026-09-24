@@ -3,6 +3,7 @@ import {
   TransportEnvelope,
   TransportKind,
   TransportResult,
+  TransportEvent,
   isValidTransportEnvelope,
 } from "./protocol";
 
@@ -39,6 +40,7 @@ export class TransportRouter {
     if (!isValidTransportEnvelope(envelope)) {
       return {
         transport: "local",
+        accepted: false,
         delivered: false,
         queued: false,
         error: "Invalid transport envelope.",
@@ -53,6 +55,7 @@ export class TransportRouter {
     ) {
       return {
         transport: "local",
+        accepted: false,
         delivered: false,
         queued: false,
         error: "Transport envelope expired.",
@@ -77,6 +80,7 @@ export class TransportRouter {
           await transport.send(envelope);
 
         if (
+          result.accepted ||
           result.delivered ||
           result.queued
         ) {
@@ -101,10 +105,40 @@ export class TransportRouter {
 
     return {
       transport: "local",
+      accepted: false,
       delivered: false,
       queued: true,
       error: lastError,
     };
+  }
+
+  async sendEvent(
+    event: TransportEvent,
+  ): Promise<boolean> {
+    const candidates = this.orderedTransports();
+
+    for (const transport of candidates) {
+      if (!transport.sendEvent) {
+        continue;
+      }
+
+      try {
+        if (!(await transport.available())) {
+          continue;
+        }
+
+        const delivered =
+          await transport.sendEvent(event);
+
+        if (delivered) {
+          return true;
+        }
+      } catch {
+        // Try the next available transport.
+      }
+    }
+
+    return false;
   }
 
   private orderedTransports():
@@ -130,27 +164,41 @@ export class TransportRouter {
         this.settings.preferredRoute,
       );
 
-    if (!preferred) {
-      return allowed;
-    }
-
     const preferredTransport =
-      allowed.find(
+      preferred
+        ? allowed.find(
+            transport =>
+              transport.kind === preferred,
+          )
+        : undefined;
+
+    const remoteTransports =
+      allowed.filter(
         transport =>
-          transport.kind === preferred,
+          transport.kind !== "local",
       );
 
-    if (!preferredTransport) {
-      return allowed;
+    const localTransports =
+      allowed.filter(
+        transport =>
+          transport.kind === "local",
+      );
+
+    if (preferredTransport) {
+      return [
+        preferredTransport,
+        ...remoteTransports.filter(
+          transport =>
+            transport !==
+            preferredTransport,
+        ),
+        ...localTransports,
+      ];
     }
 
     return [
-      preferredTransport,
-      ...allowed.filter(
-        transport =>
-          transport !==
-          preferredTransport,
-      ),
+      ...remoteTransports,
+      ...localTransports,
     ];
   }
 

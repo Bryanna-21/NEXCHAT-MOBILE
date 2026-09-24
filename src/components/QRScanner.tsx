@@ -24,6 +24,7 @@ export function QRScanner({
     id: string;
     displayName: string;
     username?: string;
+    publicKey: string;
     avatarUri?: string;
   }) => void;
 }) {

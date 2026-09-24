@@ -6,6 +6,7 @@ export type NexChatQRContact = {
   id: string;
   displayName: string;
   username?: string;
+  publicKey: string;
   avatarUri?: string;
 };
 
@@ -14,6 +15,7 @@ export function createContactQR(identity: Identity): string {
     id: identity.id,
     displayName: identity.displayName,
     username: identity.username,
+    publicKey: identity.publicKey,
     avatarUri: identity.avatarUri,
   };
 
@@ -39,7 +41,9 @@ export function parseContactQR(data: string): NexChatQRContact {
     typeof payload !== "object" ||
     payload === null ||
     typeof (payload as any).id !== "string" ||
-    typeof (payload as any).displayName !== "string"
+    typeof (payload as any).displayName !== "string" ||
+    typeof (payload as any).publicKey !== "string" ||
+    (payload as any).publicKey.length === 0
   ) {
     throw new Error("The NexChat QR code contains invalid contact data.");
   }

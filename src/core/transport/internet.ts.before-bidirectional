@@ -1,0 +1,175 @@
+import {
+  NexTransport,
+  TransportEnvelope,
+  TransportEvent,
+  TransportResult,
+} from "./protocol";
+
+type RelayMessage =
+  | {
+      type: "envelope";
+      envelope: TransportEnvelope;
+    }
+  | {
+      type: "event";
+      event: TransportEvent;
+    };
+
+export interface InternetRelayTransportOptions {
+  relayUrl?: string;
+  identityId: string;
+}
+
+export class InternetRelayTransport implements NexTransport {
+  readonly kind = "internet-relay" as const;
+
+  private readonly relayUrl?: string;
+  private readonly identityId: string;
+
+  private socket: WebSocket | null = null;
+  private connecting: Promise<WebSocket | null> | null = null;
+
+  constructor(options: InternetRelayTransportOptions) {
+    this.relayUrl = options.relayUrl?.trim() || undefined;
+    this.identityId = options.identityId;
+  }
+
+  async available(): Promise<boolean> {
+    return Boolean(this.relayUrl && this.identityId);
+  }
+
+  async send(
+    envelope: TransportEnvelope,
+  ): Promise<TransportResult> {
+    if (!(await this.available())) {
+      return {
+        transport: this.kind,
+        accepted: false,
+        delivered: false,
+        queued: false,
+        error: "Internet relay is not configured.",
+      };
+    }
+
+    const socket = await this.getSocket();
+
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return {
+        transport: this.kind,
+        accepted: false,
+        delivered: false,
+        queued: false,
+        error: "Internet relay is unavailable.",
+      };
+    }
+
+    const message: RelayMessage = {
+      type: "envelope",
+      envelope,
+    };
+
+    socket.send(JSON.stringify(message));
+
+    return {
+      transport: this.kind,
+      accepted: true,
+      delivered: false,
+      queued: false,
+      messageId: envelope.messageId,
+    };
+  }
+
+  async sendEvent(
+    event: TransportEvent,
+  ): Promise<boolean> {
+    if (!(await this.available())) {
+      return false;
+    }
+
+    const socket = await this.getSocket();
+
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+
+    const message: RelayMessage = {
+      type: "event",
+      event,
+    };
+
+    socket.send(JSON.stringify(message));
+    return true;
+  }
+
+  close(): void {
+    if (this.socket) {
+      this.socket.close();
+      this.socket = null;
+    }
+  }
+
+  private async getSocket(): Promise<WebSocket | null> {
+    if (!this.relayUrl) {
+      return null;
+    }
+
+    if (
+      this.socket &&
+      this.socket.readyState === WebSocket.OPEN
+    ) {
+      return this.socket;
+    }
+
+    if (this.connecting) {
+      return this.connecting;
+    }
+
+    this.connecting = new Promise<WebSocket | null>(
+      (resolve) => {
+        const socket = new WebSocket(this.relayUrl!);
+
+        const timeout = setTimeout(() => {
+          try {
+            socket.close();
+          } catch {
+            // Ignore close failures.
+          }
+
+          resolve(null);
+        }, 5000);
+
+        socket.onopen = () => {
+          clearTimeout(timeout);
+
+          this.socket = socket;
+
+          socket.send(
+            JSON.stringify({
+              type: "register",
+              identityId: this.identityId,
+            }),
+          );
+
+          resolve(socket);
+        };
+
+        socket.onerror = () => {
+          clearTimeout(timeout);
+          resolve(null);
+        };
+
+        socket.onclose = () => {
+          if (this.socket === socket) {
+            this.socket = null;
+          }
+        };
+      },
+    );
+
+    try {
+      return await this.connecting;
+    } finally {
+      this.connecting = null;
+    }
+  }
+}

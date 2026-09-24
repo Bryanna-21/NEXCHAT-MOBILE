@@ -14,7 +14,7 @@ import * as Sharing from "expo-sharing";
 import {initIdentity,getIdentity,Identity,updateIdentity} from "./src/core/identity";
 import {initVault,verifyVault,getVaultSize,clearVault} from "./src/core/vault";
 import {createBackupSnapshot,restoreFromBackup} from "./src/core/backup";
-import {useNexChatStore,Attachment,Conversation,NexContact,Message,MessageStatus,CallHistoryEntry,getPersistedSettingsSnapshot} from "./src/core/store";
+import {useNexChatStore,Attachment,Conversation,NexContact,Message,MessageStatus,CallHistoryEntry,getPersistedSettingsSnapshot,initializeNetworkTransport} from "./src/core/store";
 import {shouldRunBackup,runBackup} from "./src/core/backupScheduler";
 import {MediaPicker} from "./src/components/MediaPicker";
 import {QRScanner} from "./src/components/QRScanner";
@@ -29,6 +29,8 @@ import {BootSplash} from "./src/components/BootSplash";
 import {ActionSheet, ActionSheetOption} from "./src/components/ActionSheet";
 import {ChatListScreen} from "./src/components/ChatListScreen";
 import {TypingDots} from "./src/components/TypingDots";
+import {usePeerTyping} from "./src/core/typing";
+import {sendTypingEvent} from "./src/core/store";
 import {FeedScreen} from "./src/components/FeedScreen";
 import {getFeedFollowCounts} from "./src/core/feed";
 import {PasscodeManager} from "./src/components/PasscodeManager";
@@ -137,6 +139,7 @@ function NewMessage({
     id: string;
     displayName: string;
     username?: string;
+    publicKey: string;
     avatarUri?: string;
   }) => {
     if (contact.id === (await getIdentity()).id) {
@@ -156,6 +159,7 @@ function NewMessage({
         id: contact.id,
         displayName: contact.displayName,
         username: contact.username,
+        publicKey: contact.publicKey,
         avatarUri: contact.avatarUri,
         online: false,
       });
@@ -666,12 +670,29 @@ function Chat({
   const st = useNexChatStore();
   const c = st.conversations.find((x) => x.peerId === peerId);
   const contact = st.contacts.find((x) => x.id === peerId);
+  const peerTyping = usePeerTyping(peerId);
 
   const [text, setText] = useState("");
+  const typingStopTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const typingActiveRef = useRef(false);
   const [media, setMedia] = useState<Attachment[]>([]);
   const [edit, setEdit] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const [voiceVisible, setVoiceVisible] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      if (typingStopTimer.current) {
+        clearTimeout(typingStopTimer.current);
+        typingStopTimer.current = null;
+      }
+
+      if (typingActiveRef.current) {
+        typingActiveRef.current = false;
+        void sendTypingEvent(peerId, "typing-stop");
+      }
+    };
+  }, [peerId]);
 
   /*
    * A per-chat theme override was already being saved by the
@@ -693,8 +714,49 @@ function Chat({
 
   const chatBackgroundImage = st.settings.chatBackgroundImage;
 
+  const handleTypingChange = (value: string) => {
+    setText(value);
+
+    if (typingStopTimer.current) {
+      clearTimeout(typingStopTimer.current);
+      typingStopTimer.current = null;
+    }
+
+    if (!value.trim()) {
+      if (typingActiveRef.current) {
+        typingActiveRef.current = false;
+        void sendTypingEvent(peerId, "typing-stop");
+      }
+      return;
+    }
+
+    if (!typingActiveRef.current) {
+      typingActiveRef.current = true;
+      void sendTypingEvent(peerId, "typing-start");
+    }
+
+    typingStopTimer.current = setTimeout(() => {
+      typingStopTimer.current = null;
+
+      if (typingActiveRef.current) {
+        typingActiveRef.current = false;
+        void sendTypingEvent(peerId, "typing-stop");
+      }
+    }, 1500);
+  };
+
   const send = async () => {
     if (!text.trim() && !media.length) return;
+
+    if (typingStopTimer.current) {
+      clearTimeout(typingStopTimer.current);
+      typingStopTimer.current = null;
+    }
+
+    if (typingActiveRef.current) {
+      typingActiveRef.current = false;
+      void sendTypingEvent(peerId, "typing-stop");
+    }
 
     if (media.length === 0) {
       await st.sendMessage(peerId, text.trim());
@@ -750,31 +812,27 @@ function Chat({
     <KeyboardAvoidingView
       style={[s.flex, { backgroundColor: chatBackground }]}
       behavior={Platform.OS === "ios" ? "padding" : "height"}
-      keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0}
+      keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 24}
     >
       <Header
-        title={contact?.displayName || peerId}
-        subtitle={contact?.online ? "online" : "offline"}
+        title={
+          contact?.username
+            ? `@${contact.username}`
+            : contact?.displayName || peerId
+        }
+        subtitle={
+          peerTyping
+            ? "typing…"
+            : contact?.online
+              ? "online"
+              : "offline"
+        }
         onBack={onBack}
         onInfo={onInfo}
         onCall={onCall}
         onVideo={onVideo}
         theme={effectiveTheme}
       />
-
-      <View
-        style={[
-          s.encryptedBar,
-          {
-            backgroundColor: effectiveTheme.card,
-            borderBottomColor: effectiveTheme.line,
-          },
-        ]}
-      >
-        <Text style={{ fontSize: 12, color: effectiveTheme.muted }}>
-          🔐 End-to-end encrypted • Local queue ready
-        </Text>
-      </View>
 
       <ImageBackground
         source={chatBackgroundImage ? { uri: chatBackgroundImage } : undefined}
@@ -826,6 +884,35 @@ function Chat({
             onViewOnce={() => st.markViewOnce(item.id)}
           />
         )}
+          ListFooterComponent={
+            <View
+              style={{
+                alignItems: "center",
+                paddingHorizontal: 20,
+                paddingVertical: 10,
+              }}
+            >
+              <View
+                style={{
+                  backgroundColor: effectiveTheme.card,
+                  borderRadius: 12,
+                  paddingHorizontal: 12,
+                  paddingVertical: 7,
+                  maxWidth: "92%",
+                }}
+              >
+                <Text
+                  style={{
+                    color: effectiveTheme.muted,
+                    fontSize: 11,
+                    textAlign: "center",
+                  }}
+                >
+                  🔒 Messages are end-to-end encrypted.
+                </Text>
+              </View>
+            </View>
+          }
           ListEmptyComponent={
             <View style={s.empty}>
               <Text style={{ color: effectiveTheme.muted }}>
@@ -869,6 +956,19 @@ function Chat({
             </ScrollView>
           )}
 
+          {peerTyping && (
+            <View
+              style={{
+                minHeight: 22,
+                justifyContent: "center",
+                paddingLeft: 12,
+                marginBottom: 4,
+              }}
+            >
+              <TypingDots color={effectiveTheme.brand} size={7} />
+            </View>
+          )}
+
           <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 8 }}>
             <TouchableOpacity onPress={openAttachments}>
               <Text style={{ fontSize: 25, color: effectiveTheme.ink }}>＋</Text>
@@ -876,7 +976,7 @@ function Chat({
 
             <TextInput
               value={text}
-              onChangeText={setText}
+              onChangeText={handleTypingChange}
               multiline
               placeholder="Message"
               placeholderTextColor={effectiveTheme.muted}
@@ -1710,7 +1810,8 @@ if(section==="chats"){
 
   const chooseChatBackgroundImage = async () => {
     try {
-      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      const permission =
+        await ImagePicker.requestMediaLibraryPermissionsAsync();
 
       if (!permission.granted) {
         Alert.alert(
@@ -1722,14 +1823,23 @@ if(section==="chats"){
 
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ["images"],
-        allowsEditing: true,
-        aspect: [9, 16],
-        quality: 0.9,
+        allowsEditing: false,
+        quality: 1,
       });
 
-      if (result.canceled || !result.assets?.length) return;
+      if (result.canceled) return;
 
-      const sourceUri = result.assets[0].uri;
+      const asset = result.assets?.[0];
+
+      if (!asset?.uri) {
+        Alert.alert(
+          "Background image",
+          "No image was returned by the device."
+        );
+        return;
+      }
+
+      const sourceUri = asset.uri;
       const documentDirectory = FileSystem.documentDirectory;
 
       if (!documentDirectory) {
@@ -1737,7 +1847,9 @@ if(section==="chats"){
       }
 
       const oldUri = st.settings.chatBackgroundImage;
-      const extension = sourceUri.split(".").pop()?.split("?")[0] || "jpg";
+      const extension =
+        sourceUri.split(".").pop()?.split("?")[0] || "jpg";
+
       const destinationUri =
         `${documentDirectory}nexchat-chat-background-${Date.now()}.${extension}`;
 
@@ -1754,13 +1866,19 @@ if(section==="chats"){
 
       if (oldUri && oldUri !== destinationUri) {
         try {
-          await FileSystem.deleteAsync(oldUri, { idempotent: true });
+          await FileSystem.deleteAsync(oldUri, {
+            idempotent: true,
+          });
         } catch {}
       }
     } catch (e) {
+      console.error("NexChat chat background picker error:", e);
+
       Alert.alert(
         "Background image",
-        e instanceof Error ? e.message : "Unable to choose that image."
+        e instanceof Error
+          ? e.message
+          : "Unable to choose that image."
       );
     }
   };
@@ -1782,15 +1900,17 @@ if(section==="chats"){
   };
 
   const selectSolidBackground = async (color:string) => {
+    const oldUri = st.settings.chatBackgroundImage;
+
     await st.updateSettings({
       chatBackground: "custom",
       chatBackgroundColor: color,
       chatBackgroundImage: undefined,
     });
 
-    if (st.settings.chatBackgroundImage) {
+    if (oldUri) {
       try {
-        await FileSystem.deleteAsync(st.settings.chatBackgroundImage, {
+        await FileSystem.deleteAsync(oldUri, {
           idempotent: true,
         });
       } catch {}
@@ -1890,6 +2010,21 @@ if(section==="chats"){
               theme={theme}
             />
 
+            <Row
+              icon="📦"
+              title="Pull down to open Archive"
+              subtitle="Pull down from the top of Chats to open Archived Chats."
+              right={
+                <Switch
+                  value={st.settings.pullDownToArchive}
+                  onValueChange={v=>st.updateSettings({
+                    pullDownToArchive:v
+                  })}
+                />
+              }
+              theme={theme}
+            />
+
             <View style={{marginTop:18}}>
               <Text style={[s.label,{color:theme.ink}]}>
                 Message colors
@@ -1975,6 +2110,18 @@ if(section==="chats"){
               >
                 Received messages
               </Text>
+
+              <View style={{marginTop:18}}>
+                <Button
+                  label="Reset message colors"
+                  secondary
+                  onPress={()=>st.updateSettings({
+                    messageColorMe:undefined,
+                    messageColorThem:undefined,
+                  })}
+                  theme={theme}
+                />
+              </View>
 
               <View
                 style={{
@@ -2224,6 +2371,8 @@ if(section==="p2p"){
         ))}
       </View>
 
+      <RelaySettings theme={theme} st={st} />
+
       <View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}>
         <Row
           icon="🔗"
@@ -2261,6 +2410,62 @@ if(section==="p2p"){
 }if(section==="blocked")return <View style={s.flex}><Header title="Blocked contacts" onBack={onBack} theme={theme}/><FlatList data={st.blockedIds} keyExtractor={x=>x} contentContainerStyle={s.form} ListEmptyComponent={<Text style={{color:theme.muted}}>No blocked contacts.</Text>} renderItem={({item})=><Row icon="🚫" title={item} theme={theme} right={<Button label="Unblock" secondary onPress={()=>st.unblock(item)}/>}/>} /></View>;
 if(section==="security")return <View style={s.flex}><Header title="Account & Security" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><PasscodeManager theme={theme}/><Button label="Verify with device biometrics" onPress={async()=>{try{const enabled=await isBiometricEnabled();if(!enabled){Alert.alert("Biometric app lock","Enable Biometric app lock first.");return;}const verified=await authenticateBiometric();Alert.alert("Biometric verification",verified?"Verified.":"Verification cancelled or failed.")}catch(e){Alert.alert("Biometric verification",e instanceof Error?e.message:"Biometric verification failed.")}}}/><Row icon="🔒" title="Biometric app lock" theme={theme} subtitle={st.settings.biometricLock?"Locks NexChat when it leaves the foreground":"Require biometric authentication when NexChat returns"} right={<Switch value={st.settings.biometricLock} onValueChange={async v=>{try{await setBiometricEnabled(v);await st.updateSettings({biometricLock:v});if(v)Alert.alert("Biometric app lock","Biometric app lock is now enabled.");}catch(e){Alert.alert("Biometric app lock",e instanceof Error?e.message:"Biometric authentication is unavailable.");}}}/>} /><Row icon="📱" title="Trusted devices" theme={theme} subtitle="Device recovery architecture"/><Text style={{color:theme.muted}}>Recovery should prioritize device authentication and a user-created recovery PIN; phone OTP is optional rather than the primary identity mechanism.</Text></ScrollView></View>;
 return <View style={s.flex}><Header title={section} onBack={onBack} theme={theme}/><View style={s.empty}><Text style={{color:theme.muted}}>This section is reserved for the next native/service layer.</Text></View></View>}
+
+function RelaySettings({theme,st}:{theme:any;st:any}){
+  const [relayUrl,setRelayUrl]=useState(st.settings.relayUrl||"");
+
+  useEffect(()=>{
+    setRelayUrl(st.settings.relayUrl||"");
+  },[st.settings.relayUrl]);
+
+  const saveRelay=async()=>{
+    const value=relayUrl.trim();
+
+    if(value && !/^wss?:\/\//i.test(value)){
+      Alert.alert(
+        "Invalid relay address",
+        "Use a WebSocket address such as ws://192.168.97.254:8787"
+      );
+      return;
+    }
+
+    await st.updateSettings({relayUrl:value});
+
+    Alert.alert(
+      "Relay settings",
+      value ? "Relay address saved. NexChat will connect automatically." : "Internet relay disabled."
+    );
+  };
+
+  return <View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}>
+    <Text style={[s.sectionTitle,{color:theme.ink}]}>Internet relay</Text>
+    <Text style={{color:theme.muted,marginBottom:8}}>
+      Enter the WebSocket relay address used for internet message delivery.
+    </Text>
+    <TextInput
+      value={relayUrl}
+      onChangeText={setRelayUrl}
+      placeholder="ws://192.168.97.254:8787"
+      placeholderTextColor={theme.muted}
+      autoCapitalize="none"
+      autoCorrect={false}
+      keyboardType="url"
+      style={[
+        s.messageInput,
+        {
+          color:theme.ink,
+          borderColor:theme.line,
+          backgroundColor:theme.bg,
+          marginBottom:8
+        }
+      ]}
+    />
+    <Button label="Save relay" onPress={saveRelay} />
+    <Text style={{color:theme.muted,fontSize:12,marginTop:8}}>
+      Leave blank and save to disable the relay connection.
+    </Text>
+  </View>;
+}
 
 function formatCallDuration(totalSeconds: number): string {
   const m = Math.floor(totalSeconds / 60);
@@ -2656,7 +2861,7 @@ function IdentitySetup({
   );
 }
 
-function AppContent(){const insets=useSafeAreaInsets();const [securityLocked,setSecurityLocked]=useState(false);const biometricPromptRef=useRef(false);const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);const st=useNexChatStore();const [call,setCall]=useState<{id:string;peerId:string;video:boolean;startedAt:string}|null>(null);const beginCall=(peerId:string,video:boolean)=>setCall({id:`call-${Date.now()}-${Math.random().toString(36).slice(2,10)}`,peerId,video,startedAt:new Date().toISOString()});const endCall=async(outcome:{status:CallHistoryEntry["status"];connectedAt?:string;durationSeconds?:number})=>{if(!call)return;const entry:CallHistoryEntry={id:call.id,peerId:call.peerId,type:call.video?"video":"voice",direction:"outgoing",status:outcome.status,startedAt:call.startedAt,connectedAt:outcome.connectedAt,endedAt:new Date().toISOString(),durationSeconds:outcome.durationSeconds};setCall(null);await st.logCall(entry);};const [startupError,setStartupError]=useState<string|null>(null);const [startupRetry,setStartupRetry]=useState(0);const [splashMinDone,setSplashMinDone]=useState(false);useEffect(()=>{(async()=>{try{await initIdentity();await initVault();await st.hydrate();setIdentity(await getIdentity());const bs=getPersistedSettingsSnapshot();const cfg={enabled:bs.backupEnabled,schedule:bs.backupSchedule,destination:bs.backupDestination};if(shouldRunBackup(cfg,bs.lastBackupRunAt??null)){const result=await runBackup(cfg);await st.updateSettings(result.success?{lastBackupRunAt:result.startedAt,lastBackupAttemptAt:result.startedAt,lastBackupError:undefined}:{lastBackupAttemptAt:result.startedAt,lastBackupError:result.error});}setStartupError(null)}catch(e){setStartupError(e instanceof Error?e.message:"NexChat failed to start for an unknown reason.")}})();},[startupRetry]);const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)} onDeleted={()=>setScreen({name:"home"})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})}/>;switch(tab){case"Chats":return <ChatListScreen theme={theme} identity={identity} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme} onStartCall={beginCall}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <StoriesScreen theme={theme} identity={identity}/>;default:return <FeedScreen theme={theme} identity={identity}/>}},[screen,tab,theme,st]);const appReady=identity!==null||startupError!==null;
+function AppContent(){const insets=useSafeAreaInsets();const [securityLocked,setSecurityLocked]=useState(false);const biometricPromptRef=useRef(false);const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);const st=useNexChatStore();const [call,setCall]=useState<{id:string;peerId:string;video:boolean;startedAt:string}|null>(null);const beginCall=(peerId:string,video:boolean)=>setCall({id:`call-${Date.now()}-${Math.random().toString(36).slice(2,10)}`,peerId,video,startedAt:new Date().toISOString()});const endCall=async(outcome:{status:CallHistoryEntry["status"];connectedAt?:string;durationSeconds?:number})=>{if(!call)return;const entry:CallHistoryEntry={id:call.id,peerId:call.peerId,type:call.video?"video":"voice",direction:"outgoing",status:outcome.status,startedAt:call.startedAt,connectedAt:outcome.connectedAt,endedAt:new Date().toISOString(),durationSeconds:outcome.durationSeconds};setCall(null);await st.logCall(entry);};const [startupError,setStartupError]=useState<string|null>(null);const [startupRetry,setStartupRetry]=useState(0);const [splashMinDone,setSplashMinDone]=useState(false);useEffect(()=>{(async()=>{try{await initIdentity();await initVault();await st.hydrate();await initializeNetworkTransport();setIdentity(await getIdentity());const bs=getPersistedSettingsSnapshot();const cfg={enabled:bs.backupEnabled,schedule:bs.backupSchedule,destination:bs.backupDestination};if(shouldRunBackup(cfg,bs.lastBackupRunAt??null)){const result=await runBackup(cfg);await st.updateSettings(result.success?{lastBackupRunAt:result.startedAt,lastBackupAttemptAt:result.startedAt,lastBackupError:undefined}:{lastBackupAttemptAt:result.startedAt,lastBackupError:result.error});}setStartupError(null)}catch(e){setStartupError(e instanceof Error?e.message:"NexChat failed to start for an unknown reason.")}})();},[startupRetry]);const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)} onDeleted={()=>setScreen({name:"home"})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})}/>;switch(tab){case"Chats":return <ChatListScreen theme={theme} identity={identity} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme} onStartCall={beginCall}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <StoriesScreen theme={theme} identity={identity}/>;default:return <FeedScreen theme={theme} identity={identity}/>}},[screen,tab,theme,st]);const appReady=identity!==null||startupError!==null;
 
 useEffect(()=>{
   const subscription=AppState.addEventListener("change",async nextState=>{
@@ -2688,4 +2893,4 @@ if(startupError){return <View style={[s.safe,{backgroundColor:theme.bg}]}><Statu
 
 export default function App(){return <SafeAreaProvider><AppContent/></SafeAreaProvider>}
 
-const s=StyleSheet.create({safe:{flex:1},flex:{flex:1},header:{minHeight:68,paddingHorizontal:8,flexDirection:"row",alignItems:"center",borderBottomWidth:1},headBack:{width:42,alignItems:"center"},headTitle:{fontSize:18,fontWeight:"900"},headSub:{fontSize:11,marginTop:2},headAction:{width:42,alignItems:"center"},empty:{flex:1,alignItems:"center",justifyContent:"center",padding:30,gap:8},chatRow:{padding:12,borderWidth:1,borderRadius:16,marginBottom:8,flexDirection:"row",gap:12},avatar:{width:48,height:48,borderRadius:24,alignItems:"center",justifyContent:"center"},chatName:{fontWeight:"900",fontSize:16},fab:{position:"absolute",right:18,bottom:78,width:58,height:58,borderRadius:29,alignItems:"center",justifyContent:"center",elevation:4},nav:{minHeight:66,borderTopWidth:1,flexDirection:"row",justifyContent:"space-around",paddingTop:8},navItem:{alignItems:"center",gap:2,minWidth:55},form:{padding:16,gap:12},label:{fontWeight:"900",marginTop:8},input:{borderWidth:1,borderRadius:14,padding:13,fontSize:15},chip:{borderWidth:1,borderRadius:14,padding:10,marginRight:8,minWidth:120},button:{backgroundColor:"#0C5A8D",paddingVertical:13,paddingHorizontal:16,borderRadius:14,alignItems:"center",justifyContent:"center"},secondary:{backgroundColor:"#E7EEF4"},danger:{backgroundColor:"#B42318"},buttonText:{color:"white",fontWeight:"900"},toggleLine:{flexDirection:"row",justifyContent:"space-between",alignItems:"center"},bubble:{maxWidth:"82%",padding:10,borderRadius:16,borderWidth:1,marginVertical:2},composer:{padding:8,borderTopWidth:1},messageInput:{flex:1,maxHeight:120,minHeight:44,borderWidth:1,borderRadius:22,paddingHorizontal:15,paddingVertical:10},send:{width:44,height:44,borderRadius:22,alignItems:"center",justifyContent:"center"},encryptedBar:{padding:7,alignItems:"center",borderBottomWidth:1},section:{marginBottom:12,borderWidth:1,borderRadius:16,overflow:"hidden"},row:{minHeight:58,paddingHorizontal:14,paddingVertical:9,flexDirection:"row",alignItems:"center",gap:12},rowIcon:{fontSize:19,width:25,textAlign:"center"},rowTitle:{fontWeight:"800",fontSize:15},rowSub:{fontSize:11,marginTop:2},chevron:{fontSize:25},sectionTitle:{fontWeight:"900",fontSize:16,padding:14,paddingBottom:4},profileHead:{alignItems:"center",padding:24},bigAvatar:{width:96,height:96,borderRadius:48,alignItems:"center",justifyContent:"center"},profileName:{fontSize:23,fontWeight:"900",marginTop:10},idBox:{borderWidth:1,borderRadius:14,padding:15,fontWeight:"900",textAlign:"center"},bigStat:{fontSize:30,fontWeight:"900"},overlay:{flex:1,backgroundColor:"#0009",alignItems:"center",justifyContent:"center",padding:24},dialog:{width:"92%",padding:20,borderRadius:20,gap:12},dialogTitle:{fontSize:20,fontWeight:"900"},callOverlay:{flex:1,backgroundColor:"#000B",alignItems:"center",justifyContent:"center",padding:20},callCard:{width:"90%",borderRadius:26,padding:28,alignItems:"center",gap:10},profilePhoto:{width:120,height:120,borderRadius:60,borderWidth:2,alignItems:"center",justifyContent:"center",overflow:"hidden"},profilePhotoImage:{width:120,height:120,borderRadius:60},qrCard:{alignItems:"center",justifyContent:"center",padding:20,borderWidth:1,borderRadius:20},qrName:{fontSize:18,fontWeight:"900",marginTop:14}})
+const s=StyleSheet.create({safe:{flex:1},flex:{flex:1},header:{minHeight:68,paddingHorizontal:8,flexDirection:"row",alignItems:"center",borderBottomWidth:1},headBack:{width:42,alignItems:"center"},headTitle:{fontSize:18,fontWeight:"900"},headSub:{fontSize:11,marginTop:2},headAction:{width:42,alignItems:"center"},empty:{flex:1,alignItems:"center",justifyContent:"center",padding:30,gap:8},chatRow:{padding:12,borderWidth:1,borderRadius:16,marginBottom:8,flexDirection:"row",gap:12},avatar:{width:48,height:48,borderRadius:24,alignItems:"center",justifyContent:"center"},chatName:{fontWeight:"900",fontSize:16},fab:{position:"absolute",right:18,bottom:78,width:58,height:58,borderRadius:29,alignItems:"center",justifyContent:"center",elevation:4},nav:{minHeight:66,borderTopWidth:1,flexDirection:"row",justifyContent:"space-around",paddingTop:8},navItem:{alignItems:"center",gap:2,minWidth:55},form:{padding:16,gap:12},label:{fontWeight:"900",marginTop:8},input:{borderWidth:1,borderRadius:14,padding:13,fontSize:15},chip:{borderWidth:1,borderRadius:14,padding:10,marginRight:8,minWidth:120},button:{backgroundColor:"#0C5A8D",paddingVertical:13,paddingHorizontal:16,borderRadius:14,alignItems:"center",justifyContent:"center"},secondary:{backgroundColor:"#E7EEF4"},danger:{backgroundColor:"#B42318"},buttonText:{color:"white",fontWeight:"900"},toggleLine:{flexDirection:"row",justifyContent:"space-between",alignItems:"center"},bubble:{maxWidth:"82%",padding:10,borderRadius:16,borderWidth:1,marginVertical:2},composer:{paddingHorizontal:8,paddingTop:8,paddingBottom:28,borderTopWidth:1},messageInput:{flex:1,maxHeight:120,minHeight:44,borderWidth:1,borderRadius:22,paddingHorizontal:15,paddingVertical:10},send:{width:44,height:44,borderRadius:22,alignItems:"center",justifyContent:"center"},encryptedBar:{padding:7,alignItems:"center",borderBottomWidth:1},section:{marginBottom:12,borderWidth:1,borderRadius:16,overflow:"hidden"},row:{minHeight:58,paddingHorizontal:14,paddingVertical:9,flexDirection:"row",alignItems:"center",gap:12},rowIcon:{fontSize:19,width:25,textAlign:"center"},rowTitle:{fontWeight:"800",fontSize:15},rowSub:{fontSize:11,marginTop:2},chevron:{fontSize:25},sectionTitle:{fontWeight:"900",fontSize:16,padding:14,paddingBottom:4},profileHead:{alignItems:"center",padding:24},bigAvatar:{width:96,height:96,borderRadius:48,alignItems:"center",justifyContent:"center"},profileName:{fontSize:23,fontWeight:"900",marginTop:10},idBox:{borderWidth:1,borderRadius:14,padding:15,fontWeight:"900",textAlign:"center"},bigStat:{fontSize:30,fontWeight:"900"},overlay:{flex:1,backgroundColor:"#0009",alignItems:"center",justifyContent:"center",padding:24},dialog:{width:"92%",padding:20,borderRadius:20,gap:12},dialogTitle:{fontSize:20,fontWeight:"900"},callOverlay:{flex:1,backgroundColor:"#000B",alignItems:"center",justifyContent:"center",padding:20},callCard:{width:"90%",borderRadius:26,padding:28,alignItems:"center",gap:10},profilePhoto:{width:120,height:120,borderRadius:60,borderWidth:2,alignItems:"center",justifyContent:"center",overflow:"hidden"},profilePhotoImage:{width:120,height:120,borderRadius:60},qrCard:{alignItems:"center",justifyContent:"center",padding:20,borderWidth:1,borderRadius:20},qrName:{fontSize:18,fontWeight:"900",marginTop:14}})

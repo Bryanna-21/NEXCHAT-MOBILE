@@ -4,13 +4,21 @@ import { deleteAttachmentIfUnreferenced } from "./attachmentLifecycle";
 import { attachmentExists } from "./attachmentStore";
 import {
   createTransportEnvelope,
+  TransportEventKind,
+  NexTransport,
 } from "./transport/protocol";
 import { LocalTransport } from "./transport/local";
+import { InternetRelayTransport } from "./transport/internet";
 import { TransportRouter } from "./transport/router";
 import {
   transition,
   messageStatusFromDelivery,
 } from "./transport/delivery";
+import {
+  encryptMessagePayload,
+  decryptMessagePayload,
+} from "./messageCrypto";
+import { getIdentity } from "./identity";
 
 /* =========================================================
    NEXCHAT STORE
@@ -105,6 +113,12 @@ export type NexContact = {
   displayName: string;
   username?: string;
 
+  /**
+   * Base64-encoded X25519 public key used for end-to-end
+   * message encryption.
+   */
+  publicKey?: string;
+
   avatar?: string;
   avatarUri?: string;
 
@@ -181,6 +195,8 @@ export type AppSettings = {
   defaultDisappearingSeconds: number;
   defaultViewOnce: boolean;
 
+  pullDownToArchive: boolean;
+
   biometricLock: boolean;
 
   p2pRoute:
@@ -188,6 +204,8 @@ export type AppSettings = {
     | "relay"
     | "wifi-direct"
     | "bluetooth";
+
+  relayUrl: string;
 
   allowDirectP2P: boolean;
   hideDirectAddress: boolean;
@@ -235,9 +253,12 @@ const defaults: AppSettings = {
   defaultDisappearingSeconds: 0,
   defaultViewOnce: false,
 
+  pullDownToArchive: false,
+
   biometricLock: false,
 
   p2pRoute: "automatic",
+  relayUrl: "",
   allowDirectP2P: false,
   hideDirectAddress: true,
 };
@@ -260,11 +281,402 @@ let state: {
 
 const listeners = new Set<() => void>();
 
-function getTransportRouter(): TransportRouter {
+let relayTransport: InternetRelayTransport | null = null;
+let relayTransportIdentityId = "";
+let relayTransportUrl = "";
+
+async function handleIncomingRelayEnvelope(
+  envelope: import("./transport/protocol").TransportEnvelope,
+  offline: boolean,
+): Promise<void> {
+  const identity = await getIdentity();
+
+  if (!identity?.id) return;
+
+  /*
+   * Never accept an envelope addressed to somebody else.
+   */
+  if (envelope.recipientId !== identity.id) {
+    return;
+  }
+
+  if (envelope.senderId === identity.id) {
+    return;
+  }
+
+  console.log(
+    "[NexChat relay] Incoming envelope received:",
+    {
+      messageId: envelope.messageId,
+      senderId: envelope.senderId,
+      recipientId: envelope.recipientId,
+      offline,
+    },
+  );
+
+  /*
+   * The ciphertext is authenticated by nacl.box. Decryption
+   * therefore verifies that the payload was encrypted for this
+   * device's messaging key and was not modified in transit.
+   */
+  let decoded: Message;
+
+  try {
+    const plaintext = await decryptMessagePayload(envelope.payload);
+    decoded = JSON.parse(
+      new TextDecoder().decode(plaintext),
+    ) as Message;
+  } catch (error) {
+    /*
+     * Do not acknowledge a message we could not authenticate
+     * and decrypt. The relay will retain it for another attempt.
+     */
+    console.error(
+      "[NexChat relay] Incoming message decrypt failed:",
+      error instanceof Error
+        ? error.message
+        : String(error),
+      {
+        messageId: envelope.messageId,
+        senderId: envelope.senderId,
+        recipientId: envelope.recipientId,
+        offline,
+      },
+    );
+
+    return;
+  }
+
+  /*
+   * The transport envelope is authoritative for sender/recipient.
+   * Do not trust those fields from inside the encrypted message
+   * payload alone.
+   */
+  if (
+    !decoded ||
+    typeof decoded.id !== "string" ||
+    !decoded.id ||
+    typeof decoded.text !== "string"
+  ) {
+    return;
+  }
+
+  if (
+    decoded.id !== envelope.messageId ||
+    decoded.recipientId !== envelope.recipientId
+  ) {
+    return;
+  }
+
+  /*
+   * Find the known contact. We use the transport sender identity
+   * rather than the display name embedded in the message.
+   */
+  const contact = state.contacts.find(
+    contact => contact.id === envelope.senderId,
+  );
+
+  /*
+   * The encrypted payload contains the sender's authenticated
+   * X25519 public key. Keep it on the contact after successful
+   * decryption so this device can reply without requiring the
+   * contact QR code to be scanned again.
+   */
+  let updatedContacts = state.contacts;
+
+  try {
+    const encryptedEnvelope = JSON.parse(
+      new TextDecoder().decode(
+        envelope.payload,
+      ),
+    ) as {
+      senderPublicKey?: unknown;
+    };
+
+    if (
+      typeof encryptedEnvelope.senderPublicKey === "string" &&
+      encryptedEnvelope.senderPublicKey.length > 0
+    ) {
+      const senderPublicKey =
+        encryptedEnvelope.senderPublicKey;
+
+      updatedContacts = state.contacts.map(
+        existingContact =>
+          existingContact.id === envelope.senderId
+            ? {
+                ...existingContact,
+                publicKey:
+                  senderPublicKey as string,
+              }
+            : existingContact,
+      );
+    }
+  } catch {
+    /*
+     * Decryption already succeeded, so never reject an otherwise
+     * valid message because of this contact-key persistence step.
+     */
+  }
+
+  const incomingMessage: Message = {
+    ...decoded,
+    senderId: envelope.senderId,
+    sender:
+      contact?.displayName ||
+      contact?.username ||
+      envelope.senderId,
+    recipientId: identity.id,
+    status: "delivered",
+    transportQueueId: envelope.queueId,
+  };
+
+  /*
+   * Idempotency: offline relay delivery may be attempted more
+   * than once. Never insert the same message twice.
+   */
+  const existingConversation = findConversation(
+    envelope.senderId,
+  );
+
+  const existingMessage = existingConversation?.messages.some(
+    message => message.id === incomingMessage.id,
+  );
+
+  if (!existingMessage) {
+    const conversation =
+      existingConversation ??
+      {
+        id:
+          `conv-${Date.now()}-${envelope.senderId}`,
+        peerId: envelope.senderId,
+        messages: [],
+        disappearingSeconds:
+          state.settings.defaultDisappearingSeconds,
+      };
+
+    const updatedConversation: Conversation = {
+      ...conversation,
+      messages: [
+        ...conversation.messages,
+        incomingMessage,
+      ],
+      unreadCount:
+        (conversation.unreadCount ?? 0) + 1,
+    };
+
+    const conversations =
+      existingConversation
+        ? state.conversations.map(
+            conversation =>
+              conversation.peerId === envelope.senderId
+                ? updatedConversation
+                : conversation,
+          )
+        : [
+            updatedConversation,
+            ...state.conversations,
+          ];
+
+    await queuePersist({
+      conversations,
+      contacts: updatedContacts,
+    });
+  } else if (updatedContacts !== state.contacts) {
+    await queuePersist({
+      contacts: updatedContacts,
+    });
+  }
+
+  /*
+   * Only acknowledge after authentication and local persistence.
+   * This is what allows the relay to remove its durable copy and
+   * tells the sender that this device actually received it.
+   */
+  if (relayTransport) {
+    await relayTransport.acknowledgeDelivery(
+      incomingMessage.id,
+      envelope.senderId,
+    );
+  }
+}
+
+async function markMessageDelivered(
+  messageId: string,
+  recipientId: string,
+): Promise<void> {
+  const conversation = findConversation(
+    recipientId,
+  );
+
+  if (!conversation) return;
+
+  let changed = false;
+
+  const messages = conversation.messages.map(
+    message => {
+      if (
+        message.id !== messageId ||
+        message.status === "delivered" ||
+        message.status === "read"
+      ) {
+        return message;
+      }
+
+      changed = true;
+
+      return {
+        ...message,
+        status: "delivered" as MessageStatus,
+      };
+    },
+  );
+
+  if (!changed) return;
+
+  const updatedConversation: Conversation = {
+    ...conversation,
+    messages,
+  };
+
+  await queuePersist({
+    conversations:
+      state.conversations.map(
+        item =>
+          item.peerId === recipientId
+            ? updatedConversation
+            : item,
+      ),
+  });
+}
+
+async function updateContactPresence(
+  identityId: string,
+  online: boolean,
+): Promise<void> {
+  if (!identityId) {
+    return;
+  }
+
+  let changed = false;
+
+  const updatedContacts =
+    state.contacts.map(
+      contact => {
+        if (contact.id !== identityId) {
+          return contact;
+        }
+
+        if (contact.online === online) {
+          return contact;
+        }
+
+        changed = true;
+
+        return {
+          ...contact,
+          online,
+        };
+      },
+    );
+
+  if (!changed) {
+    return;
+  }
+
+  await queuePersist({
+    contacts: updatedContacts,
+  });
+}
+
+function configureRelayTransport(identityId: string): void {
+  const relayUrl = state.settings.relayUrl.trim();
+
+  if (
+    relayTransport &&
+    (
+      relayTransportIdentityId !== identityId ||
+      relayTransportUrl !== relayUrl
+    )
+  ) {
+    relayTransport.close();
+    relayTransport = null;
+    relayTransportIdentityId = "";
+    relayTransportUrl = "";
+  }
+
+  if (!relayUrl) {
+    if (relayTransport) {
+      relayTransport.close();
+      relayTransport = null;
+    }
+    return;
+  }
+
+  if (relayTransport) return;
+
+  relayTransport = new InternetRelayTransport({
+    relayUrl,
+    identityId,
+    onlineStatus:
+      state.settings.onlineStatus,
+
+    onPresence: (
+      peerId,
+      online,
+    ) => {
+      void updateContactPresence(
+        peerId,
+        online,
+      );
+    },
+
+    onEnvelope: async (
+      envelope,
+      offline,
+    ) => {
+      await handleIncomingRelayEnvelope(
+        envelope,
+        offline,
+      );
+    },
+
+    onDeliveryAck: (
+      messageId,
+      recipientId,
+    ) => {
+      void markMessageDelivered(
+        messageId,
+        recipientId,
+      );
+    },
+  });
+
+  relayTransportIdentityId = identityId;
+  relayTransportUrl = relayUrl;
+
+  /*
+   * Open the persistent relay connection during initialization.
+   * This keeps NexChat able to receive messages even when the
+   * user is not currently sending anything.
+   */
+  void relayTransport.connect();
+}
+
+function getTransportRouter(
+  identityId: string,
+): TransportRouter {
+  configureRelayTransport(identityId);
+
+  const transports: NexTransport[] = [
+    new LocalTransport(),
+  ];
+
+  if (relayTransport) {
+    transports.push(relayTransport);
+  }
+
   return new TransportRouter({
-    transports: [
-      new LocalTransport(),
-    ],
+    transports,
     settings: {
       preferredRoute:
         state.settings.p2pRoute,
@@ -301,6 +713,36 @@ function findConversation(
  */
 export function getPersistedSettingsSnapshot(): AppSettings {
   return state.settings;
+}
+
+
+export async function sendTypingEvent(
+  peerId: string,
+  kind: TransportEventKind,
+): Promise<boolean> {
+  const identity = await getIdentity();
+
+  if (!identity?.id) {
+    return false;
+  }
+
+  const now = Date.now();
+
+  return getTransportRouter(identity.id).sendEvent({
+    id:
+      `evt-${now}-${Math.random()
+        .toString(36)
+        .slice(2, 10)}`,
+    kind,
+    senderId: identity.id,
+    recipientId: peerId,
+    createdAt:
+      new Date(now).toISOString(),
+    expiresAt:
+      new Date(
+        now + 5000,
+      ).toISOString(),
+  });
 }
 
 function encodeTransportPayload(
@@ -459,6 +901,14 @@ function queuePersist(
   writeChain = task.catch(() => {});
 
   return task;
+}
+
+export async function initializeNetworkTransport(): Promise<void> {
+  const identity = await getIdentity();
+
+  if (!identity?.id) return;
+
+  configureRelayTransport(identity.id);
 }
 
 export function useNexChatStore() {
@@ -628,13 +1078,41 @@ export function useNexChatStore() {
         status: "sending",
       };
 
+      const identity =
+        await getIdentity();
+
+      const isSelfChat =
+        identity?.id === peerId;
+
+      const recipientPublicKey =
+        isSelfChat
+          ? identity?.publicKey
+          : state.contacts.find(
+              (contact) =>
+                contact.id === peerId,
+            )?.publicKey;
+
+      if (!recipientPublicKey) {
+        throw new Error(
+          "This contact does not have a messaging public key. Ask them to share their NexChat QR code again.",
+        );
+      }
+
+      const encryptedPayload =
+        await encryptMessagePayload(
+          new TextEncoder().encode(
+            JSON.stringify(
+              sendingMessage,
+            ),
+          ),
+          recipientPublicKey,
+        );
+
       const envelope =
         createTransportEnvelope(
-          "me",
+          identity.id,
           peerId,
-          encodeTransportPayload(
-            sendingMessage,
-          ),
+          encryptedPayload,
           sendingMessage.id,
         );
 
@@ -644,7 +1122,7 @@ export function useNexChatStore() {
 
       try {
         transportResult =
-          await getTransportRouter().send(
+          await getTransportRouter(identity.id).send(
             envelope,
           );
       } catch (error) {
@@ -667,6 +1145,12 @@ export function useNexChatStore() {
           transition(
             deliveryState,
             "delivered",
+          );
+      } else if (transportResult.accepted) {
+        deliveryState =
+          transition(
+            deliveryState,
+            "sent",
           );
       } else if (transportResult.queued) {
         deliveryState =
@@ -725,56 +1209,12 @@ export function useNexChatStore() {
       });
 
       /*
-       * Simulate the recipient reading the message after a
-       * short delay, gated by the Read Receipts setting.
+       * Read receipts must come from the recipient device.
        *
-       * This is a local-only demo transport with no real
-       * recipient device, so there is no genuine read
-       * confirmation to wait for. This delay exists so the
-       * tick UI (sent -> delivered -> read) is meaningfully
-       * testable rather than permanently stuck.
-       *
-       * Respecting Read Receipts here matches real messaging
-       * apps: turning Read Receipts off means you also stop
-       * seeing other people's read status, so the ladder caps
-       * at the double "delivered" tick and never turns blue.
-       *
-       * The guard (status === "delivered") avoids clobbering a
-       * message that failed, was deleted, or was edited in the
-       * meantime.
+       * There is intentionally no local timer here. A remote
+       * delivery/read acknowledgement will update this message
+       * once real transport synchronization is connected.
        */
-      if (state.settings.readReceipts) {
-        const readMessageId = finalMessage.id;
-        const readPeerId = peerId;
-
-        setTimeout(() => {
-          queuePersist({
-            conversations:
-              state.conversations.map(
-                (c) =>
-                  c.peerId === readPeerId
-                    ? {
-                        ...c,
-                        messages:
-                          c.messages.map(
-                            (mm) =>
-                              mm.id ===
-                                readMessageId &&
-                              mm.status ===
-                                "delivered"
-                                ? {
-                                    ...mm,
-                                    status:
-                                      "read",
-                                  }
-                                : mm
-                          ),
-                      }
-                    : c
-              ),
-          });
-        }, 2500);
-      }
     },
 
     editMessage: async (
@@ -1364,6 +1804,36 @@ export function useNexChatStore() {
           ...patch,
         },
       });
+
+      if (
+        Object.prototype.hasOwnProperty.call(
+          patch,
+          "relayUrl",
+        ) ||
+        Object.prototype.hasOwnProperty.call(
+          patch,
+          "onlineStatus",
+        )
+      ) {
+        const identity = await getIdentity();
+
+        if (identity?.id) {
+          if (
+            Object.prototype.hasOwnProperty.call(
+              patch,
+              "onlineStatus",
+            ) &&
+            relayTransport
+          ) {
+            relayTransport.close();
+            relayTransport = null;
+            relayTransportIdentityId = "";
+            relayTransportUrl = "";
+          }
+
+          configureRelayTransport(identity.id);
+        }
+      }
     },
 
     block: async (

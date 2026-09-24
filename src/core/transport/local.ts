@@ -6,8 +6,6 @@ import {
 
 import {
   enqueue,
-  markSending,
-  markDelivered,
 } from "./queue";
 
 export class LocalTransport
@@ -48,15 +46,14 @@ export class LocalTransport
      * never called by anything), which is why message status
      * ticks never advanced past the "sending" clock icon.
      */
-    markSending(item.id);
-    markDelivered(item.id);
-
     return {
       transport: this.kind,
-      delivered: true,
-      queued: false,
+      accepted: false,
+      delivered: false,
+      queued: true,
       queueId:
         envelope.queueId ?? item.id,
+      messageId: envelope.messageId,
     };
   }
 }

@@ -3,6 +3,7 @@ import {
   Alert,
   FlatList,
   Modal,
+  RefreshControl,
   StyleSheet,
   Text,
   TextInput,
@@ -48,6 +49,8 @@ export function ChatListScreen({
 
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [archiveVisible, setArchiveVisible] = useState(false);
+  const [archiveRefreshing, setArchiveRefreshing] = useState(false);
 
   const loadGroups = useCallback(async () => {
     if (!myId) return;
@@ -96,12 +99,56 @@ export function ChatListScreen({
 
   const q = query.trim().toLowerCase();
 
-  const conversationRows: UnifiedRow[] = st.conversations
-    .filter((c) => !c.archived)
+  const archivedRows = st.conversations
+    .filter((c) => c.archived && c.peerId !== myId)
     .map((c) => {
       const contact = st.contacts.find((x) => x.id === c.peerId);
       const last = c.messages.at(-1);
-      const name = contact?.displayName || c.peerId;
+
+      return {
+        peerId: c.peerId,
+        name:
+          contact?.username
+            ? `@${contact.username}`
+            : contact?.displayName || c.peerId,
+        preview: last?.deletedForEveryone || last?.deletedForMe
+          ? "Message deleted"
+          : last?.callInfo
+          ? last.callInfo.type === "video" ? "🎥 Video call" : "📞 Voice call"
+          : last?.text || last?.attachment?.name || "No messages",
+        time: last ? new Date(last.createdAt).getTime() : 0,
+      };
+    })
+    .sort((a, b) => b.time - a.time);
+
+  const openArchive = async () => {
+    if (!st.settings.pullDownToArchive || archiveRefreshing) return;
+
+    setArchiveRefreshing(true);
+    setArchiveVisible(true);
+
+    setTimeout(() => {
+      setArchiveRefreshing(false);
+    }, 250);
+  };
+
+  const selfConversation = st.conversations.find(
+    (c) => c.peerId === myId && !c.archived,
+  );
+
+  const conversationRows: UnifiedRow[] = st.conversations
+    .filter(
+      (c) =>
+        !c.archived &&
+        c.peerId !== myId,
+    )
+    .map((c) => {
+      const contact = st.contacts.find((x) => x.id === c.peerId);
+      const last = c.messages.at(-1);
+      const name =
+        contact?.username
+          ? `@${contact.username}`
+          : contact?.displayName || c.peerId;
 
       return {
         kind: "conversation" as const,
@@ -118,6 +165,25 @@ export function ChatListScreen({
         unread: (c.unreadCount ?? 0) > 0,
       };
     });
+
+  if (myId) {
+    conversationRows.unshift({
+      kind: "conversation" as const,
+      peerId: myId,
+      name: "Message yourself",
+      preview: selfConversation?.messages.at(-1)?.text
+        || selfConversation?.messages.at(-1)?.attachment?.name
+        || "Notes to yourself",
+      time: selfConversation?.messages.at(-1)
+        ? new Date(
+            selfConversation.messages.at(-1)!.createdAt,
+          ).getTime()
+        : 0,
+      pinned: false,
+      muted: false,
+      unread: false,
+    });
+  }
 
   const groupRows: UnifiedRow[] = groups.map((g) => ({
     kind: "group" as const,
@@ -305,6 +371,16 @@ const chatActionsOptions: ActionSheetOption[] = chatActionsFor
         data={rows}
         keyExtractor={rowKey}
         contentContainerStyle={{ padding: 12, paddingBottom: 100 }}
+        refreshControl={
+          st.settings.pullDownToArchive ? (
+            <RefreshControl
+              refreshing={archiveRefreshing}
+              onRefresh={openArchive}
+              tintColor={theme.brand}
+              colors={[theme.brand]}
+            />
+          ) : undefined
+        }
         ListEmptyComponent={
           <View style={s.empty}>
             <Text style={{ fontSize: 40, color: theme.ink }}>◌</Text>
@@ -370,6 +446,195 @@ const chatActionsOptions: ActionSheetOption[] = chatActionsFor
         }}
       />
 
+      <Modal
+        visible={archiveVisible}
+        animationType="slide"
+        onRequestClose={() => setArchiveVisible(false)}
+      >
+        <View style={[s.flex, { backgroundColor: theme.bg }]}>
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              paddingHorizontal: 16,
+              paddingTop: 14,
+              paddingBottom: 12,
+              borderBottomWidth: 1,
+              borderBottomColor: theme.line,
+            }}
+          >
+            <TouchableOpacity
+              onPress={() => setArchiveVisible(false)}
+              style={{ paddingRight: 14 }}
+            >
+              <Text style={{ color: theme.brand, fontSize: 24 }}>‹</Text>
+            </TouchableOpacity>
+
+            <View style={{ flex: 1 }}>
+              <Text
+                style={{
+                  color: theme.ink,
+                  fontSize: 20,
+                  fontWeight: "900",
+                }}
+              >
+                Archived Chats
+              </Text>
+              <Text style={{ color: theme.muted, fontSize: 12 }}>
+                {archivedRows.length} archived chat{archivedRows.length === 1 ? "" : "s"}
+              </Text>
+            </View>
+          </View>
+
+          <FlatList
+            data={archivedRows}
+            keyExtractor={(item) => item.peerId}
+            contentContainerStyle={{
+              padding: 12,
+              paddingBottom: 40,
+              flexGrow: archivedRows.length === 0 ? 1 : 0,
+            }}
+            ListEmptyComponent={
+              <View
+                style={[
+                  s.empty,
+                  {
+                    flex: 1,
+                    justifyContent: "center",
+                    minHeight: 300,
+                  },
+                ]}
+              >
+                <Text style={{ fontSize: 40, color: theme.ink }}>📦</Text>
+                <Text
+                  style={{
+                    fontWeight: "800",
+                    fontSize: 18,
+                    color: theme.ink,
+                    marginTop: 8,
+                  }}
+                >
+                  No archived chats
+                </Text>
+                <Text
+                  style={{
+                    color: theme.muted,
+                    textAlign: "center",
+                    marginTop: 6,
+                  }}
+                >
+                  Chats you archive will appear here.
+                </Text>
+              </View>
+            }
+            renderItem={({ item }) => (
+              <View
+                style={[
+                  s.chatRow,
+                  {
+                    backgroundColor: theme.card,
+                    borderColor: theme.line,
+                  },
+                ]}
+              >
+                <TouchableOpacity
+                  onPress={() => {
+                    setArchiveVisible(false);
+                    onOpen(item.peerId);
+                  }}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    flex: 1,
+                  }}
+                >
+                  <View
+                    style={[
+                      s.avatar,
+                      {
+                        backgroundColor: theme.brand,
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={{
+                        color: "white",
+                        fontWeight: "900",
+                      }}
+                    >
+                      {item.name.slice(0, 1).toUpperCase()}
+                    </Text>
+                  </View>
+
+                  <View style={{ flex: 1 }}>
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <Text
+                        style={[
+                          s.chatName,
+                          {
+                            color: theme.ink,
+                            flex: 1,
+                          },
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {item.name}
+                      </Text>
+
+                      <Text
+                        style={{
+                          color: theme.muted,
+                          fontSize: 11,
+                          marginLeft: 8,
+                        }}
+                      >
+                        {item.time
+                          ? new Date(item.time).toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })
+                          : ""}
+                      </Text>
+                    </View>
+
+                    <Text
+                      numberOfLines={1}
+                      style={{ color: theme.muted }}
+                    >
+                      {item.preview}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => st.archiveConversation(item.peerId, false)}
+                  style={{
+                    marginLeft: 10,
+                    paddingHorizontal: 8,
+                    paddingVertical: 8,
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: theme.brand,
+                      fontWeight: "800",
+                      fontSize: 12,
+                    }}
+                  >
+                    Unarchive
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          />
+        </View>
+      </Modal>
+
       {!selectMode && (
         <TouchableOpacity onPress={onNew} style={[s.fab, { backgroundColor: theme.brand }]}>
           <Text style={{ color: "white", fontSize: 28 }}>＋</Text>
@@ -409,7 +674,9 @@ const chatActionsOptions: ActionSheetOption[] = chatActionsFor
         <View style={s.peekOverlay}>
           <View style={[s.peekCard, { backgroundColor: theme.card }]}>
             <Text style={{ color: theme.ink, fontWeight: "800", fontSize: 16, marginBottom: 4 }}>
-              {peekContact?.displayName || peekPeerId}
+              {peekContact?.username
+                ? `@${peekContact.username}`
+                : peekContact?.displayName || peekPeerId}
             </Text>
             <Text style={{ color: theme.muted, fontSize: 11, marginBottom: 10 }}>
               Peek — viewing doesn't mark this chat as read
