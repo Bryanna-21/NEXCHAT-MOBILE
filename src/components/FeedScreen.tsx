@@ -331,6 +331,17 @@ function FeedMedia({
 
         <View
           pointerEvents="none"
+          style={styles.feedImageBrandLeft}
+        >
+          <Image
+            source={require("../../assets/icon.png")}
+            style={styles.feedImageBrandIcon}
+            resizeMode="contain"
+          />
+        </View>
+
+        <View
+          pointerEvents="none"
           style={styles.feedBrandWatermark}
         >
           <Text style={styles.feedBrandWatermarkText}>
@@ -4526,6 +4537,22 @@ const styles = StyleSheet.create({
   mediaEditorVideoText: {
     fontSize: 14,
     fontWeight: "800",
+  },
+
+  feedImageBrandLeft: {
+    position: "absolute",
+    left: 12,
+    bottom: 12,
+    width: 34,
+    height: 34,
+    borderRadius: 9,
+    overflow: "hidden",
+    backgroundColor: "rgba(0,0,0,0.30)",
+  },
+
+  feedImageBrandIcon: {
+    width: "100%",
+    height: "100%",
   },
 
   feedBrandWatermark: {
