@@ -19,6 +19,12 @@ import {
   decryptMessagePayload,
 } from "./messageCrypto";
 import { getIdentity } from "./identity";
+import {
+  CallSignal,
+  SignalType,
+  createCallSignal,
+} from "./callSignaling";
+import { initializeQueue } from "./transport/queue";
 
 /* =========================================================
    NEXCHAT STORE
@@ -280,6 +286,8 @@ let state: {
 };
 
 const listeners = new Set<() => void>();
+const callSignalListeners =
+  new Set<(signal: CallSignal) => void>();
 
 let relayTransport: InternetRelayTransport | null = null;
 let relayTransportIdentityId = "";
@@ -649,6 +657,54 @@ function configureRelayTransport(identityId: string): void {
         recipientId,
       );
     },
+
+    onEvent: async (event) => {
+      if (
+        event.kind !== "call-signal" ||
+        !event.payload
+      ) {
+        return;
+      }
+
+      try {
+        const signal =
+          JSON.parse(
+            event.payload,
+          ) as CallSignal;
+
+        if (
+          !signal.id ||
+          !signal.callId ||
+          !signal.senderId ||
+          !signal.recipientId ||
+          !signal.type
+        ) {
+          return;
+        }
+
+        if (
+          signal.senderId !== event.senderId ||
+          signal.recipientId !== identityId
+        ) {
+          return;
+        }
+
+        if (
+          Date.parse(signal.createdAt) + 60_000 <
+          Date.now()
+        ) {
+          return;
+        }
+
+        for (
+          const listener of callSignalListeners
+        ) {
+          listener(signal);
+        }
+      } catch {
+        // Invalid signaling must never crash the relay.
+      }
+    },
   });
 
   relayTransportIdentityId = identityId;
@@ -715,6 +771,53 @@ export function getPersistedSettingsSnapshot(): AppSettings {
   return state.settings;
 }
 
+
+export function subscribeCallSignals(
+  listener: (signal: CallSignal) => void,
+): () => void {
+  callSignalListeners.add(listener);
+
+  return () => {
+    callSignalListeners.delete(listener);
+  };
+}
+
+export async function sendCallSignal(
+  peerId: string,
+  callId: string,
+  type: SignalType,
+  payload?: string,
+): Promise<boolean> {
+  const identity = await getIdentity();
+
+  if (!identity?.id) {
+    return false;
+  }
+
+  const signal = createCallSignal(
+    callId,
+    identity.id,
+    peerId,
+    type,
+    payload,
+  );
+
+  const now = Date.now();
+
+  return getTransportRouter(
+    identity.id,
+  ).sendEvent({
+    id: `call-${signal.id}`,
+    kind: "call-signal",
+    senderId: identity.id,
+    recipientId: peerId,
+    createdAt: signal.createdAt,
+    expiresAt: new Date(
+      now + 60_000,
+    ).toISOString(),
+    payload: JSON.stringify(signal),
+  });
+}
 
 export async function sendTypingEvent(
   peerId: string,
@@ -904,6 +1007,12 @@ function queuePersist(
 }
 
 export async function initializeNetworkTransport(): Promise<void> {
+  /*
+   * Restore the durable encrypted offline queue before
+   * the network/relay transport begins processing messages.
+   */
+  await initializeQueue();
+
   const identity = await getIdentity();
 
   if (!identity?.id) return;
@@ -1020,13 +1129,8 @@ export function useNexChatStore() {
       /*
        * Attachment integrity boundary.
        *
-       * Every message attachment must already exist in the
-       * durable attachment store before the message reference
-       * is persisted.
-       *
-       * Forwarded messages intentionally reuse the same
-       * attachment ID, so this verification also protects
-       * forwarded references without duplicating the file.
+       * The attachment must already exist before the message
+       * reference is persisted.
        */
       if (attachment?.id) {
         const exists =
@@ -1098,6 +1202,11 @@ export function useNexChatStore() {
         );
       }
 
+      /*
+       * Encrypt before exposing the message to the UI.
+       * This keeps the optimistic state valid: once "sending"
+       * appears, the encrypted envelope is already ready.
+       */
       const encryptedPayload =
         await encryptMessagePayload(
           new TextEncoder().encode(
@@ -1118,6 +1227,52 @@ export function useNexChatStore() {
 
       envelope.ttl = 7 * 24 * 60 * 60 * 1000;
 
+      /*
+       * OPTIMISTIC LOCAL PERSISTENCE
+       *
+       * Put the message into the conversation before waiting
+       * for relay/network delivery. This is the critical fix
+       * for slow devices: tapping Send must never make the
+       * interface wait for an 8-second relay acknowledgement.
+       */
+      const sendingConversation: Conversation = {
+        ...conversation,
+
+        messages: [
+          ...conversation.messages,
+          sendingMessage,
+        ],
+      };
+
+      const sendingExists =
+        state.conversations.some(
+          (c) =>
+            c.peerId === peerId
+        );
+
+      const sendingConversations =
+        sendingExists
+          ? state.conversations.map(
+              (c) =>
+                c.peerId === peerId
+                  ? sendingConversation
+                  : c,
+            )
+          : [
+              sendingConversation,
+              ...state.conversations,
+            ];
+
+      await queuePersist({
+        conversations:
+          sendingConversations,
+      });
+
+      /*
+       * Transport now runs only after the UI has received the
+       * optimistic message. The existing relay/offline/local
+       * transport architecture remains unchanged.
+       */
       let transportResult;
 
       try {
@@ -1126,10 +1281,40 @@ export function useNexChatStore() {
             envelope,
           );
       } catch (error) {
-        transition(
-          deliveryState,
-          "failed",
-        );
+        deliveryState =
+          transition(
+            deliveryState,
+            "failed",
+          );
+
+        const failedConversation =
+          findConversation(peerId);
+
+        if (failedConversation) {
+          await queuePersist({
+            conversations:
+              state.conversations.map(
+                (c) =>
+                  c.peerId === peerId
+                    ? {
+                        ...failedConversation,
+                        messages:
+                          failedConversation.messages.map(
+                            (item) =>
+                              item.id ===
+                              sendingMessage.id
+                                ? {
+                                    ...item,
+                                    status:
+                                      "failed" as MessageStatus,
+                                  }
+                                : item,
+                          ),
+                      }
+                    : c,
+              ),
+          });
+        }
 
         throw error;
       }
@@ -1166,55 +1351,49 @@ export function useNexChatStore() {
           );
       }
 
-      const finalMessage: Message = {
-        ...sendingMessage,
-        status:
-          messageStatusFromDelivery(
-            deliveryState,
-          ),
-        transportQueueId:
-          transportResult.queueId,
-      };
+      /*
+       * Replace only this message with the confirmed transport
+       * state. The message remains visible throughout the entire
+       * operation.
+       */
+      const currentConversation =
+        findConversation(peerId);
 
-      const updatedConversation: Conversation =
-        {
-          ...conversation,
+      if (!currentConversation) {
+        return;
+      }
 
-          messages: [
-            ...conversation.messages,
-            finalMessage,
-          ],
-        };
-
-      const exists =
-        state.conversations.some(
-          (c) =>
-            c.peerId === peerId
+      const finalStatus =
+        messageStatusFromDelivery(
+          deliveryState,
         );
 
-      const conversations = exists
-        ? state.conversations.map(
-            (c) =>
-              c.peerId === peerId
-                ? updatedConversation
-                : c
-          )
-        : [
-            updatedConversation,
-            ...state.conversations,
-          ];
+      const finalConversation: Conversation = {
+        ...currentConversation,
+
+        messages:
+          currentConversation.messages.map(
+            (item) =>
+              item.id === sendingMessage.id
+                ? {
+                    ...item,
+                    status: finalStatus,
+                    transportQueueId:
+                      transportResult.queueId,
+                  }
+                : item,
+          ),
+      };
 
       await queuePersist({
-        conversations,
+        conversations:
+          state.conversations.map(
+            (c) =>
+              c.peerId === peerId
+                ? finalConversation
+                : c,
+          ),
       });
-
-      /*
-       * Read receipts must come from the recipient device.
-       *
-       * There is intentionally no local timer here. A remote
-       * delivery/read acknowledgement will update this message
-       * once real transport synchronization is connected.
-       */
     },
 
     editMessage: async (

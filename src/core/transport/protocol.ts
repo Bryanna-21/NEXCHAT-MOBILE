@@ -24,7 +24,8 @@ export interface TransportEnvelope {
 
 export type TransportEventKind =
   | "typing-start"
-  | "typing-stop";
+  | "typing-stop"
+  | "call-signal";
 
 export interface TransportEvent {
   id: string;
@@ -33,6 +34,7 @@ export interface TransportEvent {
   recipientId: string;
   createdAt: string;
   expiresAt: string;
+  payload?: string;
 }
 
 export interface TransportResult {
