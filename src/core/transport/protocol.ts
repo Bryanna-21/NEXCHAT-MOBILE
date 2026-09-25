@@ -86,6 +86,15 @@ export function createTransportEnvelope(
 }
 
 
+export function cloneTransportEnvelope(
+  envelope: TransportEnvelope,
+): TransportEnvelope {
+  return {
+    ...envelope,
+    payload: new Uint8Array(envelope.payload),
+  };
+}
+
 export function isValidTransportEnvelope(
   envelope: TransportEnvelope,
 ): boolean {

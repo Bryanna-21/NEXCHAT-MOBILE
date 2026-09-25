@@ -11,7 +11,11 @@ import {
 
 import { useNexChatStore } from "../core/store";
 import { Identity } from "../core/identity";
-import { addStory, createStory } from "../core/stories";
+import {
+  addStory,
+  createStory,
+  StoryAudience,
+} from "../core/stories";
 import { capturePhoto, captureVideo, pickMedia } from "../core/media";
 import { StoryShortcut } from "./StoryShortcut";
 import { StoryViewer } from "./StoryViewer";
@@ -33,6 +37,15 @@ export function StoriesScreen({ theme, identity }: StoriesScreenProps) {
   const [refreshKey, setRefreshKey] = useState(0);
   const [posting, setPosting] = useState(false);
 
+  const [audience, setAudience] =
+    useState<StoryAudience>("everyone");
+
+  const [selectedContactIds, setSelectedContactIds] =
+    useState<string[]>([]);
+
+  const [audiencePickerVisible, setAudiencePickerVisible] =
+    useState(false);
+
   const myId = identity?.id;
   const myName = identity?.displayName || "You";
 
@@ -49,10 +62,30 @@ export function StoriesScreen({ theme, identity }: StoriesScreenProps) {
       return;
     }
 
+    if (
+      audience === "selected" &&
+      selectedContactIds.length === 0
+    ) {
+      Alert.alert(
+        "Choose contacts",
+        "Select at least one contact who can see this story.",
+      );
+      return;
+    }
+
+    const allowedViewerIds =
+      audience === "everyone"
+        ? undefined
+        : audience === "contacts"
+          ? st.contacts.map((contact) => contact.id)
+          : selectedContactIds;
+
     const story = createStory(myId, {
       type: "text",
       text,
       background: theme.brand,
+      audience,
+      allowedViewerIds,
     });
 
     await addStory(story);
@@ -79,9 +112,29 @@ export function StoriesScreen({ theme, identity }: StoriesScreenProps) {
         return;
       }
 
+      if (
+        audience === "selected" &&
+        selectedContactIds.length === 0
+      ) {
+        Alert.alert(
+          "Choose contacts",
+          "Select at least one contact who can see this story.",
+        );
+        return;
+      }
+
+      const allowedViewerIds =
+        audience === "everyone"
+          ? undefined
+          : audience === "contacts"
+            ? st.contacts.map((contact) => contact.id)
+            : selectedContactIds;
+
       const story = createStory(myId, {
         type: media.type,
         uri: media.uri,
+        audience,
+        allowedViewerIds,
       });
 
       await addStory(story);
@@ -98,6 +151,13 @@ export function StoriesScreen({ theme, identity }: StoriesScreenProps) {
 
   const [composerMenuVisible, setComposerMenuVisible] = useState(false);
   const composerMenuOptions: ActionSheetOption[] = [
+    {
+      text: "Story audience",
+      onPress: () => {
+        setComposerMenuVisible(false);
+        setAudiencePickerVisible(true);
+      },
+    },
     {
       text: "Camera photo",
       onPress: () =>
@@ -223,6 +283,8 @@ export function StoriesScreen({ theme, identity }: StoriesScreenProps) {
             ownerName={myName}
             onPress={() => setViewerOwnerId(myId)}
             theme={theme}
+            viewerId={myId}
+            viewerContactIds={st.contacts.map((contact) => contact.id)}
           />
         )}
 
@@ -236,6 +298,8 @@ export function StoriesScreen({ theme, identity }: StoriesScreenProps) {
               avatarUri={c.avatarUri}
               onPress={() => setViewerOwnerId(c.id)}
               theme={theme}
+              viewerId={myId}
+              viewerContactIds={st.contacts.map((contact) => contact.id)}
             />
           ))}
       </ScrollView>
@@ -257,6 +321,28 @@ export function StoriesScreen({ theme, identity }: StoriesScreenProps) {
             <Text style={[s.composerTitle, { color: theme.ink }]}>
               New story
             </Text>
+
+            <TouchableOpacity
+              onPress={() => setAudiencePickerVisible(true)}
+              style={[
+                s.audienceButton,
+                { borderColor: theme.line },
+              ]}
+            >
+              <Text
+                style={{
+                  color: theme.ink,
+                  fontWeight: "700",
+                }}
+              >
+                Audience:{" "}
+                {audience === "everyone"
+                  ? "Everyone"
+                  : audience === "contacts"
+                    ? "My contacts"
+                    : `Selected contacts (${selectedContactIds.length})`}
+              </Text>
+            </TouchableOpacity>
 
             <TextInput
               value={draft}
@@ -308,12 +394,133 @@ export function StoriesScreen({ theme, identity }: StoriesScreenProps) {
               viewerOwnerId ||
               ""
         }
+        viewerId={myId}
+        viewerContactIds={st.contacts.map((contact) => contact.id)}
         onClose={() => {
           setViewerOwnerId(null);
           setRefreshKey((k) => k + 1);
         }}
       />
       </>
+      )}
+
+      {audiencePickerVisible && (
+        <View style={s.composerOverlay}>
+          <View
+            style={[
+              s.composerCard,
+              {
+                backgroundColor: theme.card,
+                borderColor: theme.line,
+              },
+            ]}
+          >
+            <Text style={[s.composerTitle, { color: theme.ink }]}>
+              Story audience
+            </Text>
+
+            {[
+              ["everyone", "Everyone"],
+              ["contacts", "My contacts"],
+              ["selected", "Selected contacts"],
+            ].map(([value, label]) => (
+              <TouchableOpacity
+                key={value}
+                onPress={() => {
+                  setAudience(value as StoryAudience);
+
+                  if (value !== "selected") {
+                    setAudiencePickerVisible(false);
+                  }
+                }}
+                style={s.audienceRow}
+              >
+                <Text
+                  style={{
+                    color:
+                      audience === value
+                        ? theme.brand
+                        : theme.ink,
+                    fontWeight:
+                      audience === value
+                        ? "800"
+                        : "600",
+                    flex: 1,
+                  }}
+                >
+                  {label}
+                </Text>
+
+                <Text style={{ color: theme.brand }}>
+                  {audience === value ? "✓" : ""}
+                </Text>
+              </TouchableOpacity>
+            ))}
+
+            {audience === "selected" && (
+              <ScrollView
+                style={s.selectedContactsList}
+                nestedScrollEnabled
+              >
+                {st.contacts
+                  .filter((contact) => contact.id !== myId)
+                  .map((contact) => {
+                    const selected =
+                      selectedContactIds.includes(contact.id);
+
+                    return (
+                      <TouchableOpacity
+                        key={contact.id}
+                        onPress={() => {
+                          setSelectedContactIds((current) =>
+                            selected
+                              ? current.filter(
+                                  (id) => id !== contact.id,
+                                )
+                              : [...current, contact.id],
+                          );
+                        }}
+                        style={s.audienceRow}
+                      >
+                        <Text
+                          style={{
+                            color: theme.ink,
+                            flex: 1,
+                          }}
+                        >
+                          {contact.displayName || contact.id}
+                        </Text>
+
+                        <Text style={{ color: theme.brand }}>
+                          {selected ? "✓" : "○"}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+              </ScrollView>
+            )}
+
+            <TouchableOpacity
+              onPress={() => setAudiencePickerVisible(false)}
+              style={[
+                s.composerButton,
+                {
+                  backgroundColor: theme.brand,
+                  marginTop: 10,
+                },
+              ]}
+            >
+              <Text
+                style={{
+                  color: "#fff",
+                  fontWeight: "700",
+                }}
+              >
+                Done
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       )}
 
       <ActionSheet
@@ -394,6 +601,23 @@ const s = StyleSheet.create({
     borderRadius: 10,
     padding: 10,
     textAlignVertical: "top",
+  },
+
+  audienceButton: {
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 11,
+    marginBottom: 10,
+  },
+
+  audienceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 11,
+  },
+
+  selectedContactsList: {
+    maxHeight: 220,
   },
 
   composerButton: {

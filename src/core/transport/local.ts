@@ -4,10 +4,6 @@ import {
   TransportResult,
 } from "./protocol";
 
-import {
-  enqueue,
-} from "./queue";
-
 export class LocalTransport
   implements NexTransport
 {
@@ -20,39 +16,19 @@ export class LocalTransport
   async send(
     envelope: TransportEnvelope,
   ): Promise<TransportResult> {
-    const item = enqueue(
-      envelope.recipientId,
-      envelope.payload,
-      envelope.messageId,
-    );
-
-    envelope.queueId = item.id;
-
     /*
-     * This is a local-only transport: there is no real second
-     * device receiving this message over any network. There is
-     * no peer to actually deliver to.
+     * The durable outbox is now populated before routing.
+     * LocalTransport therefore must NOT enqueue a second copy.
      *
-     * "Delivered" here means the message was durably handed off
-     * to this device's local outbox — the full extent of what a
-     * local-only transport can honestly claim. It does NOT mean
-     * a remote peer received it. Real device-to-device delivery
-     * requires the Bluetooth/Wi-Fi Direct/relay transports, which
-     * remain unimplemented (see NativeBluetoothTransport /
-     * NativeWiFiDirectTransport).
-     *
-     * Without this, every message stayed in "queued" forever
-     * (markDelivered/markSending existed in the queue but were
-     * never called by anything), which is why message status
-     * ticks never advanced past the "sending" clock icon.
+     * A local transport result means the message remains safely
+     * queued on this device for the delivery worker.
      */
     return {
       transport: this.kind,
       accepted: false,
       delivered: false,
       queued: true,
-      queueId:
-        envelope.queueId ?? item.id,
+      queueId: envelope.queueId,
       messageId: envelope.messageId,
     };
   }

@@ -24,7 +24,18 @@ import {
   SignalType,
   createCallSignal,
 } from "./callSignaling";
-import { initializeQueue } from "./transport/queue";
+import {
+  initializeQueue,
+  recoverInterruptedItems,
+  enqueue,
+  markAccepted,
+  markDelivered,
+  markDeliveredByMessageId,
+} from "./transport/queue";
+
+import {
+  DeliveryWorker,
+} from "./transport/worker";
 
 /* =========================================================
    NEXCHAT STORE
@@ -512,6 +523,15 @@ async function markMessageDelivered(
   messageId: string,
   recipientId: string,
 ): Promise<void> {
+  /*
+   * The relay only emits this callback after the recipient
+   * successfully decrypts, persists, and acknowledges the
+   * message. Therefore this is the authoritative delivery event.
+   */
+  markDeliveredByMessageId(
+    messageId,
+  );
+
   const conversation = findConversation(
     recipientId,
   );
@@ -741,6 +761,18 @@ function getTransportRouter(
     },
   });
 }
+
+/*
+ * Durable outbound delivery worker.
+ *
+ * It reuses the same router as foreground sends, so the
+ * persisted queue follows the same relay/direct-route rules.
+ */
+const deliveryWorker =
+  new DeliveryWorker(
+    identityId =>
+      getTransportRouter(identityId),
+  );
 
 let writeChain: Promise<void> = Promise.resolve();
 
@@ -1013,11 +1045,24 @@ export async function initializeNetworkTransport(): Promise<void> {
    */
   await initializeQueue();
 
+  /*
+   * A process can disappear while an item is in "sending".
+   * Those items are safe to retry after startup.
+   */
+  recoverInterruptedItems();
+
   const identity = await getIdentity();
 
   if (!identity?.id) return;
 
   configureRelayTransport(identity.id);
+
+  /*
+   * Start durable outbound delivery after queue restoration.
+   * start() is idempotent, so repeated initialization will
+   * not create multiple worker timers.
+   */
+  deliveryWorker.start(identity.id);
 }
 
 export function useNexChatStore() {
@@ -1228,6 +1273,25 @@ export function useNexChatStore() {
       envelope.ttl = 7 * 24 * 60 * 60 * 1000;
 
       /*
+       * DURABLE OUTBOX
+       *
+       * Persist the complete encrypted envelope before any
+       * network transport is attempted. This guarantees that
+       * an app restart, connection loss, or relay failure cannot
+       * make an already-sent message disappear.
+       *
+       * The queue contains only encrypted payload bytes plus
+       * routing metadata. It never contains plaintext message
+       * content.
+       */
+      const queueItem = enqueue(
+        envelope,
+      );
+
+      envelope.queueId =
+        queueItem.id;
+
+      /*
        * OPTIMISTIC LOCAL PERSISTENCE
        *
        * Put the message into the conversation before waiting
@@ -1331,12 +1395,21 @@ export function useNexChatStore() {
             deliveryState,
             "delivered",
           );
+
+        markDelivered(
+          queueItem.id,
+        );
       } else if (transportResult.accepted) {
         deliveryState =
           transition(
             deliveryState,
             "sent",
           );
+
+        markAccepted(
+          queueItem.id,
+          transportResult.transport,
+        );
       } else if (transportResult.queued) {
         deliveryState =
           transition(

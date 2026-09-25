@@ -17,6 +17,8 @@ type StoryShortcutProps = {
   avatarUri?: string;
   onPress: () => void;
   theme: any;
+  viewerId?: string;
+  viewerContactIds?: string[];
 };
 
 export function StoryShortcut({
@@ -25,6 +27,8 @@ export function StoryShortcut({
   avatarUri,
   onPress,
   theme,
+  viewerId,
+  viewerContactIds = [],
 }: StoryShortcutProps) {
   const [stories, setStories] = useState<Story[]>([]);
 
@@ -32,7 +36,11 @@ export function StoryShortcut({
     let mounted = true;
 
     async function load() {
-      const result = await getStoriesForUser(ownerId);
+      const result = await getStoriesForUser(
+        ownerId,
+        viewerId,
+        viewerContactIds,
+      );
 
       if (mounted) {
         setStories(result);
@@ -44,7 +52,7 @@ export function StoryShortcut({
     return () => {
       mounted = false;
     };
-  }, [ownerId]);
+  }, [ownerId, viewerId, viewerContactIds.join("|")]);
 
   if (!stories.length) {
     return null;
