@@ -8,6 +8,7 @@ import React, {
 import { FeedProfileScreen } from "./FeedProfileScreen";
 import {
   ActivityIndicator,
+  Animated,
   Alert,
   Image,
   KeyboardAvoidingView,
@@ -21,8 +22,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
-  View,
-} from "react-native";
+  View,} from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import * as ImagePicker from "expo-image-picker";
@@ -296,6 +296,7 @@ function formatAttachmentSize(size?: number) {
   return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+
 function FeedMedia({
   attachment,
   theme,
@@ -327,6 +328,15 @@ function FeedMedia({
           style={styles.feedImage}
           resizeMode="cover"
         />
+
+        <View
+          pointerEvents="none"
+          style={styles.feedBrandWatermark}
+        >
+          <Text style={styles.feedBrandWatermarkText}>
+            NEXCHAT • EXILE
+          </Text>
+        </View>
 
         {attachment.overlayText?.trim() ? (
           <View
@@ -387,6 +397,9 @@ function FeedVideo({
 
   const [playing, setPlaying] = useState(false);
   const [manualPaused, setManualPaused] = useState(false);
+  const [showVideoEndCard, setShowVideoEndCard] = useState(false);
+  const endCardOpacity = useRef(new Animated.Value(0)).current;
+  const endCardScale = useRef(new Animated.Value(0.92)).current;
   const singleTapTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTapRef = useRef(0);
 
@@ -409,6 +422,14 @@ function FeedVideo({
         });
 
         setPlaying(isPlaying);
+
+        if (isPlaying) {
+          setShowVideoEndCard(false);
+          endCardOpacity.stopAnimation();
+          endCardScale.stopAnimation();
+          endCardOpacity.setValue(0);
+          endCardScale.setValue(0.92);
+        }
 
         if (!isPlaying && activeFeedVideoPlayer === player) {
           activeFeedVideoPlayer = null;
@@ -495,34 +516,74 @@ function FeedVideo({
           uri: attachment.uri,
         });
 
-        const handled = onVideoEnd?.() ?? false;
+        setPlaying(false);
 
-        if (handled) {
-          console.log("[NEXCHAT VIDEO] MOVING TO NEXT VIDEO", {
+        endCardOpacity.stopAnimation();
+        endCardScale.stopAnimation();
+        endCardOpacity.setValue(0);
+        endCardScale.setValue(0.92);
+
+        setShowVideoEndCard(true);
+
+        Animated.parallel([
+          Animated.timing(endCardOpacity, {
+            toValue: 1,
+            duration: 260,
+            useNativeDriver: true,
+          }),
+          Animated.sequence([
+            Animated.timing(endCardScale, {
+              toValue: 1.04,
+              duration: 180,
+              useNativeDriver: true,
+            }),
+            Animated.spring(endCardScale, {
+              toValue: 1,
+              friction: 7,
+              tension: 90,
+              useNativeDriver: true,
+            }),
+          ]),
+        ]).start();
+
+        setTimeout(() => {
+          Animated.timing(endCardOpacity, {
+            toValue: 0,
+            duration: 220,
+            useNativeDriver: true,
+          }).start(() => {
+            setShowVideoEndCard(false);
+          });
+
+          const handled = onVideoEnd?.() ?? false;
+
+          if (handled) {
+            console.log("[NEXCHAT VIDEO] MOVING TO NEXT VIDEO", {
+              uri: attachment.uri,
+            });
+
+            return;
+          }
+
+          /*
+           * No later video exists.
+           * Replay this video from the beginning instead of
+           * manually setting currentTime and calling play().
+           */
+          console.log("[NEXCHAT VIDEO] LAST VIDEO - REPLAY", {
             uri: attachment.uri,
           });
 
-          return;
-        }
-
-        /*
-         * No later video exists.
-         * Replay this video from the beginning instead of
-         * manually setting currentTime and calling play().
-         */
-        console.log("[NEXCHAT VIDEO] LAST VIDEO - REPLAY", {
-          uri: attachment.uri,
-        });
-
-        try {
-          activeFeedVideoPlayer = player;
-          setManualPaused(false);
-          setPlaying(true);
-          player.replay();
-        } catch (error) {
-          console.log("[NEXCHAT VIDEO] REPLAY ERROR", error);
-          setPlaying(false);
-        }
+          try {
+            activeFeedVideoPlayer = player;
+            setManualPaused(false);
+            setPlaying(true);
+            player.replay();
+          } catch (error) {
+            console.log("[NEXCHAT VIDEO] REPLAY ERROR", error);
+            setPlaying(false);
+          }
+        }, 2000);
       },
     );
 
@@ -603,6 +664,37 @@ function FeedVideo({
             ]}
           />
         )}
+
+        {showVideoEndCard ? (
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.feedVideoEndCard,
+              {
+                opacity: endCardOpacity,
+                transform: [{ scale: endCardScale }],
+              },
+            ]}
+          >
+            <Image
+              source={require("../../assets/icon.png")}
+              style={styles.feedVideoEndCardLogo}
+              resizeMode="contain"
+            />
+
+            <Text style={styles.feedVideoEndCardApp}>
+              NEXCHAT
+            </Text>
+
+            <Text style={styles.feedVideoEndCardExile}>
+              • EXILE
+            </Text>
+
+            <Text style={styles.feedVideoEndCardCreator}>
+              PRIVATE • LOCAL-FIRST
+            </Text>
+          </Animated.View>
+        ) : null}
 
         {attachment.overlayText?.trim() ? (
           <View
@@ -4434,6 +4526,65 @@ const styles = StyleSheet.create({
   mediaEditorVideoText: {
     fontSize: 14,
     fontWeight: "800",
+  },
+
+  feedBrandWatermark: {
+    position: "absolute",
+    right: 14,
+    bottom: 14,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    backgroundColor: "rgba(0,0,0,0.30)",
+  },
+
+  feedBrandWatermarkText: {
+    color: "#FFFFFF",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+    textShadowColor: "rgba(0,0,0,0.7)",
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
+  },
+
+  feedVideoEndCard: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0,0,0,0.72)",
+    paddingHorizontal: 24,
+  },
+
+  feedVideoEndCardLogo: {
+    width: 72,
+    height: 72,
+    borderRadius: 18,
+    marginBottom: 12,
+  },
+
+  feedVideoEndCardApp: {
+    color: "#FFFFFF",
+    fontSize: 22,
+    fontWeight: "900",
+    letterSpacing: 2.2,
+  },
+
+  feedVideoEndCardExile: {
+    color: "#FFFFFF",
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 2,
+    marginTop: 3,
+    opacity: 0.78,
+  },
+
+  feedVideoEndCardCreator: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "700",
+    marginTop: 18,
+    opacity: 0.92,
   },
 
   mediaOverlayPreview: {
