@@ -26,15 +26,32 @@ import {
 import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import * as ImagePicker from "expo-image-picker";
+import * as DocumentPicker from "expo-document-picker";
 import * as MediaLibrary from "expo-media-library";
 import * as Clipboard from "expo-clipboard";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { useVideoPlayer, VideoView } from "expo-video";
+import { WebView } from "react-native-webview";
+const Pdf = null;
+import {
+  downloadDirectLink,
+  resolveLink,
+  resolveLinkMetadata,
+} from "../core/linkResolver";
+import { ingestAttachment } from "../core/attachmentIngestion";
+import { canUserSeeFeedPost } from "../core/feedAudience";
+import {
+  loadRecentFeedSearches,
+  saveRecentFeedSearch,
+  removeRecentFeedSearch,
+} from "../core/feedSearch";
+import { useNexChatStore } from "../core/store";
 
 import {
   createFeedPost,
   updateFeedPost,
   incrementFeedShare,
+  incrementFeedPostView,
   FeedAttachment,
   FeedCreator,
   FeedPost,
@@ -51,11 +68,13 @@ import {
   getFeedCommentReaction,
   toggleFeedPostPinned,
   toggleFeedPostNotifications,
+  setFeedPostReshareAllowed,
+  toggleFeedPostReshare,
   archiveFeedPost,
   deleteFeedPost,
 } from "../core/feed";
 
-type FeedTheme = {
+export type FeedTheme = {
   bg: string;
   card: string;
   ink: string;
@@ -90,7 +109,7 @@ function identityValue(
   }
 }
 
-function getCreator(identity: unknown): FeedCreator {
+export function getCreator(identity: unknown): FeedCreator {
   const id =
     identityValue(identity, ["id", "userId", "identityId"]) ??
     "local-user";
@@ -252,7 +271,9 @@ function FeedMediaCarousel({
               { width: carouselWidth || "100%" },
             ]}
           >
-            {isActive && page !== index && item.kind === "video" ? (
+            {isActive &&
+              page !== index &&
+              (item.kind === "video" || item.kind === "tiktok") ? (
               <View style={[styles.feedVideo, { backgroundColor: theme.bg }]} />
             ) : (
               <FeedMedia
@@ -297,7 +318,7 @@ function formatAttachmentSize(size?: number) {
 }
 
 
-function FeedMedia({
+export function FeedMedia({
   attachment,
   theme,
   isActive = false,
@@ -369,6 +390,16 @@ function FeedMedia({
     );
   }
 
+  if (kind === "tiktok") {
+    return (
+      <FeedTikTok
+        attachment={attachment}
+        theme={theme}
+        isActive={isActive}
+      />
+    );
+  }
+
   if (kind === "video") {
     return (
       <FeedVideo
@@ -385,7 +416,193 @@ function FeedMedia({
     return <FeedAudio attachment={attachment} theme={theme} />;
   }
 
+  if (kind === "file") {
+    return <FeedFile attachment={attachment} theme={theme} />;
+  }
+
   return null;
+}
+
+function FeedTikTok({
+  attachment,
+  theme,
+  isActive = false,
+}: {
+  attachment: FeedAttachment;
+  theme: FeedTheme;
+  isActive?: boolean;
+}) {
+  const videoId = attachment.videoId;
+  const webViewRef = useRef<WebView>(null);
+
+  if (!videoId || !isActive) {
+    return (
+      <View
+        style={[
+          styles.feedVideoStage,
+          {
+            backgroundColor: theme.bg,
+          },
+        ]}
+      />
+    );
+  }
+
+  const playerUrl =
+    `https://www.tiktok.com/player/v1/${videoId}` +
+    `?autoplay=1&muted=0&loop=0` +
+    `&controls=0` +
+    `&description=0` +
+    `&music_info=0` +
+    `&rel=0` +
+    `&native_context_menu=0` +
+    `&closed_caption=0` +
+    `&timestamp=0` +
+    `&progress_bar=0` +
+    `&play_button=0` +
+    `&volume_control=0` +
+    `&fullscreen_button=0`;
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1.0, maximum-scale=1.0"
+        />
+        <style>
+          html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+          }
+
+          iframe {
+            border: 0;
+            width: 100%;
+            height: 100%;
+            display: block;
+          }
+        </style>
+      </head>
+
+      <body>
+        <iframe
+          id="nexchat-tiktok-player"
+          src="${playerUrl}"
+          allow="autoplay; fullscreen"
+          allowfullscreen
+          title="NexChat media"
+        ></iframe>
+
+        <script>
+          const player =
+            document.getElementById("nexchat-tiktok-player");
+
+          function sendPlayerCommand(type) {
+            try {
+              player.contentWindow.postMessage(
+                {
+                  type,
+                  "x-tiktok-player": true
+                },
+                "*"
+              );
+            } catch (e) {
+              // Ignore player-command failures.
+            }
+          }
+
+          window.addEventListener("message", function(event) {
+            try {
+              window.ReactNativeWebView.postMessage(
+                JSON.stringify(event.data)
+              );
+            } catch (e) {
+              // Ignore bridge failures.
+            }
+          });
+
+          window.nexchatStartVideo = function() {
+            sendPlayerCommand("unMute");
+            sendPlayerCommand("play");
+          };
+        </script>
+      </body>
+    </html>
+  `;
+
+  return (
+    <View
+      style={[
+        styles.feedVideoStage,
+        {
+          backgroundColor: "#000",
+        },
+      ]}
+    >
+      <WebView
+        ref={webViewRef}
+        key={`tiktok-${videoId}`}
+        source={{
+          html,
+          baseUrl: "https://www.tiktok.com/",
+        }}
+        style={styles.feedVideo}
+        originWhitelist={["*"]}
+        javaScriptEnabled
+        domStorageEnabled
+        allowsInlineMediaPlayback
+        mediaPlaybackRequiresUserAction={false}
+        allowsFullscreenVideo={false}
+        scrollEnabled={false}
+        bounces={false}
+        onLoadStart={() => {
+          console.log("[NEXCHAT TIKTOK] WEBVIEW LOAD START", {
+            videoId,
+          });
+        }}
+        onLoad={() => {
+          console.log("[NEXCHAT TIKTOK] WEBVIEW LOAD", {
+            videoId,
+          });
+        }}
+        onError={(event) => {
+          console.log("[NEXCHAT TIKTOK] WEBVIEW ERROR", {
+            videoId,
+            error: event.nativeEvent,
+          });
+        }}
+        onHttpError={(event) => {
+          console.log("[NEXCHAT TIKTOK] WEBVIEW HTTP ERROR", {
+            videoId,
+            statusCode: event.nativeEvent.statusCode,
+            description: event.nativeEvent.description,
+          });
+        }}
+        onMessage={(event) => {
+          try {
+            const data = JSON.parse(event.nativeEvent.data);
+
+            if (data?.type === "onPlayerReady") {
+              webViewRef.current?.injectJavaScript(`
+                if (window.nexchatStartVideo) {
+                  window.nexchatStartVideo();
+                }
+                true;
+              `);
+            }
+          } catch {
+            // Ignore non-JSON player messages.
+          }
+        }}
+      />
+    </View>
+  );
 }
 
 function FeedVideo({
@@ -413,6 +630,7 @@ function FeedVideo({
   const endCardScale = useRef(new Animated.Value(0.92)).current;
   const singleTapTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTapRef = useRef(0);
+  const watermarkProgress = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     return () => {
@@ -422,6 +640,31 @@ function FeedVideo({
       }
     };
   }, []);
+
+  useEffect(() => {
+    watermarkProgress.setValue(0);
+
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(watermarkProgress, {
+          toValue: 1,
+          duration: 9000,
+          useNativeDriver: true,
+        }),
+        Animated.timing(watermarkProgress, {
+          toValue: 0,
+          duration: 9000,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+
+    animation.start();
+
+    return () => {
+      animation.stop();
+    };
+  }, [watermarkProgress]);
 
   useEffect(() => {
     const subscription = player.addListener(
@@ -511,7 +754,6 @@ function FeedVideo({
         duration: player.duration,
       });
 
-      setPlaying(true);
       player.play();
     } catch (error) {
       console.log("[NEXCHAT VIDEO] AUTO PLAY ERROR", error);
@@ -724,6 +966,31 @@ function FeedVideo({
           </View>
         ) : null}
 
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.feedVideoWatermark,
+            {
+              opacity: watermarkProgress.interpolate({
+                inputRange: [0, 0.5, 1],
+                outputRange: [0.55, 0.9, 0.55],
+              }),
+              transform: [
+                {
+                  translateX: watermarkProgress.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [-70, 70],
+                  }),
+                },
+              ],
+            },
+          ]}
+        >
+          <Text style={styles.feedVideoWatermarkText}>
+            NEXCHAT • EXILE
+          </Text>
+        </Animated.View>
+
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={
@@ -842,6 +1109,198 @@ function FeedAudio({
   );
     }
 
+function FeedPdf({
+  attachment,
+  theme,
+}: {
+  attachment: FeedAttachment;
+  theme: FeedTheme;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  const handleShare = async () => {
+    if (!attachment.uri || busy) return;
+
+    setBusy(true);
+
+    try {
+      if (!(await Sharing.isAvailableAsync())) {
+        Alert.alert(
+          "Sharing unavailable",
+          "NexChat could not open the device share system for this PDF.",
+        );
+        return;
+      }
+
+      await Sharing.shareAsync(attachment.uri, {
+        mimeType: "application/pdf",
+        dialogTitle: `Share ${attachment.name || "PDF"}`,
+      });
+    } catch (error) {
+      console.error("[NEXCHAT FEED] PDF SHARE ERROR", error);
+      Alert.alert(
+        "Share failed",
+        "NexChat could not share this PDF.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleOpen = async () => {
+    if (!attachment.uri || busy) return;
+
+    setBusy(true);
+
+    try {
+      let targetUri = attachment.uri;
+
+      if (Platform.OS === "android" && attachment.uri.startsWith("file://")) {
+        targetUri = await FileSystem.getContentUriAsync(attachment.uri);
+      }
+
+      const canOpen = await Linking.canOpenURL(targetUri);
+
+      if (!canOpen) {
+        Alert.alert(
+          "No PDF app found",
+          "Install a PDF reader on this device or use Share to send the file to another app.",
+          [
+            { text: "Share", onPress: () => void handleShare() },
+            { text: "Cancel", style: "cancel" },
+          ],
+        );
+        return;
+      }
+
+      await Linking.openURL(targetUri);
+    } catch (error) {
+      console.error("[NEXCHAT FEED] PDF OPEN ERROR", error);
+      Alert.alert(
+        "Could not open PDF",
+        "NexChat could not open this PDF on the device.",
+        [
+          { text: "Share", onPress: () => void handleShare() },
+          { text: "Cancel", style: "cancel" },
+        ],
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePress = () => {
+    if (busy) return;
+
+    Alert.alert(
+      attachment.name || "PDF document",
+      "What would you like to do?",
+      [
+        { text: "Open PDF", onPress: () => void handleOpen() },
+        { text: "Share", onPress: () => void handleShare() },
+        { text: "Cancel", style: "cancel" },
+      ],
+    );
+  };
+
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`PDF document ${attachment.name || "Document.pdf"}`}
+      onPress={handlePress}
+      disabled={busy}
+      style={[
+        styles.fileCard,
+        {
+          backgroundColor: theme.bg,
+          borderColor: theme.line,
+          opacity: busy ? 0.65 : 1,
+        },
+      ]}
+    >
+      <View
+        style={[
+          styles.fileIcon,
+          {
+            backgroundColor: theme.brand,
+          },
+        ]}
+      >
+        <Text style={styles.fileIconText}>PDF</Text>
+      </View>
+
+      <View style={styles.fileInfo}>
+        <Text
+          style={[styles.attachmentName, { color: theme.ink }]}
+          numberOfLines={2}
+        >
+          {attachment.name || "Document.pdf"}
+        </Text>
+
+        <Text style={[styles.attachmentType, { color: theme.muted }]}>
+          {busy ? "Opening…" : "Tap to open or share"}
+        </Text>
+      </View>
+    </Pressable>
+  );
+}
+
+function FeedFile({
+  attachment,
+  theme,
+}: {
+  attachment: FeedAttachment;
+  theme: FeedTheme;
+}) {
+  const fileName = attachment.name || "Document";
+  const mimeType = attachment.mimeType || "application/octet-stream";
+
+  if (mimeType === "application/pdf" || /\.pdf$/i.test(fileName)) {
+    return <FeedPdf attachment={attachment} theme={theme} />;
+  }
+
+  const fileType = mimeType.includes("/")
+    ? mimeType.split("/")[1].toUpperCase()
+    : "FILE";
+
+  return (
+    <View
+      style={[
+        styles.fileCard,
+        {
+          backgroundColor: theme.bg,
+          borderColor: theme.line,
+        },
+      ]}
+    >
+      <View
+        style={[
+          styles.fileIcon,
+          {
+            backgroundColor: theme.brand,
+          },
+        ]}
+      >
+        <Text style={styles.fileIconText}>▣</Text>
+      </View>
+
+      <View style={styles.fileInfo}>
+        <Text
+          style={[styles.attachmentName, { color: theme.ink }]}
+          numberOfLines={2}
+        >
+          {fileName}
+        </Text>
+
+        <Text style={[styles.attachmentType, { color: theme.muted }]}>
+          {fileType}
+          {attachment.size ? ` • ${formatAttachmentSize(attachment.size)}` : ""}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
 function PostCard({
   post,
   theme,
@@ -849,6 +1308,7 @@ function PostCard({
   onLike,
   onComments,
   onShare,
+  onReshare,
   onProfile,
   onPostMenu,
   isActive = false,
@@ -861,6 +1321,7 @@ function PostCard({
   onLike: (post: FeedPost) => void;
   onComments: (post: FeedPost) => void;
   onShare: (post: FeedPost) => void;
+  onReshare: (post: FeedPost) => void;
   onProfile?: (creator: FeedCreator) => void;
   onPostMenu: (post: FeedPost) => void;
   isActive?: boolean;
@@ -893,12 +1354,26 @@ function PostCard({
     }
   };
 
+  const handleReshare = async () => {
+    if (post.allowReshare === false) return;
+
+    const result = await toggleFeedPostReshare(post.id, userId);
+
+    if (result) {
+      onReshare(result);
+    }
+  };
+
   const attachments =
     post.attachments && post.attachments.length > 0
       ? post.attachments
       : post.attachment
         ? [post.attachment]
         : [];
+
+  const resolvedLink = post.linkUrl
+    ? resolveLink(post.linkUrl)
+    : null;
 
   return (
     <View
@@ -978,6 +1453,8 @@ function PostCard({
       {post.type === "link" && post.linkUrl && (
         <Pressable
           onPress={openLink}
+          accessibilityRole="link"
+          accessibilityLabel={`Open ${post.linkProvider || resolvedLink?.provider || "website"} link`}
           style={[
             styles.linkCard,
             {
@@ -986,16 +1463,56 @@ function PostCard({
             },
           ]}
         >
-          <Text style={[styles.linkLabel, { color: theme.brand }]}>
-            LINK
-          </Text>
+          {post.linkImageUri ? (
+            <Image
+              source={{ uri: post.linkImageUri }}
+              style={styles.linkPreviewImage}
+              resizeMode="cover"
+            />
+          ) : null}
 
-          <Text
-            style={[styles.linkText, { color: theme.ink }]}
-            numberOfLines={3}
-          >
-            {post.linkUrl}
-          </Text>
+          <View style={styles.linkCardContent}>
+            <Text
+              style={[styles.linkLabel, { color: theme.brand }]}
+              numberOfLines={1}
+            >
+              {post.linkProvider ||
+                resolvedLink?.provider ||
+                resolvedLink?.siteName ||
+                "WEBSITE"}
+            </Text>
+
+            <Text
+              style={[styles.linkTitle, { color: theme.ink }]}
+              numberOfLines={2}
+            >
+              {post.linkTitle ||
+                resolvedLink?.title ||
+                "Open shared link"}
+            </Text>
+
+            {post.linkDescription ? (
+              <Text
+                style={[styles.linkDescription, { color: theme.muted }]}
+                numberOfLines={3}
+              >
+                {post.linkDescription}
+              </Text>
+            ) : null}
+
+            <Text
+              style={[styles.linkUrl, { color: theme.muted }]}
+              numberOfLines={1}
+            >
+              {post.linkUrl}
+            </Text>
+
+            <Text
+              style={[styles.linkAction, { color: theme.brand }]}
+            >
+              Open link →
+            </Text>
+          </View>
         </Pressable>
       )}
 
@@ -1084,6 +1601,29 @@ function PostCard({
             ↗ Share {post.shareCount ? post.shareCount : ""}
           </Text>
         </Pressable>
+
+        {post.allowReshare !== false && (
+          <Pressable
+            onPress={handleReshare}
+            style={styles.actionButton}
+            accessibilityRole="button"
+            accessibilityLabel="Reshare post"
+          >
+            <Text
+              style={[
+                styles.actionText,
+                {
+                  color: post.resharedBy?.includes(userId)
+                    ? theme.brand
+                    : theme.muted,
+                },
+              ]}
+            >
+              ↻ Reshare{" "}
+              {post.resharedBy?.length ? post.resharedBy.length : ""}
+            </Text>
+          </Pressable>
+        )}
       </View>
     </View>
   );
@@ -1094,7 +1634,26 @@ export function FeedScreen({
   identity,
   onOpenProfile,
 }: FeedScreenProps) {
+  const st = useNexChatStore();
+
   const [posts, setPosts] = useState<FeedPost[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [showRecentSearches, setShowRecentSearches] = useState(false);
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
+
+  useEffect(() => {
+    let active = true;
+
+    loadRecentFeedSearches().then((searches) => {
+      if (active) {
+        setRecentSearches(searches);
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
   const [activeCommentPost, setActiveCommentPost] =
     useState<FeedPost | null>(null);
   const [profileCreator, setProfileCreator] = useState<FeedCreator | null>(null);
@@ -1107,6 +1666,7 @@ export function FeedScreen({
   const postLayoutsRef = useRef<
     Record<string, { y: number; height: number }>
   >({});
+  const viewedPostIdsRef = useRef<Set<string>>(new Set());
   const [activeVideoPostId, setActiveVideoPostId] = useState<string | null>(
     null,
   );
@@ -1201,13 +1761,42 @@ export function FeedScreen({
   );
 
 
-  const handlePostLike = useCallback((updatedPost: FeedPost) => {
-    setPosts((current) =>
-      current.map((post) =>
-        post.id === updatedPost.id ? updatedPost : post,
-      ),
-    );
-  }, []);
+  const resolvePostCreator = useCallback(
+    (post: FeedPost): FeedPost =>
+      post.creator.id === creator.id
+        ? {
+            ...post,
+            creator,
+          }
+        : post,
+    [creator],
+  );
+
+  const handlePostLike = useCallback(
+    (updatedPost: FeedPost) => {
+      const resolvedPost = resolvePostCreator(updatedPost);
+
+      setPosts((current) =>
+        current.map((post) =>
+          post.id === resolvedPost.id ? resolvedPost : post,
+        ),
+      );
+    },
+    [resolvePostCreator],
+  );
+
+  const handlePostReshare = useCallback(
+    (updatedPost: FeedPost) => {
+      const resolvedPost = resolvePostCreator(updatedPost);
+
+      setPosts((current) =>
+        current.map((post) =>
+          post.id === resolvedPost.id ? resolvedPost : post,
+        ),
+      );
+    },
+    [resolvePostCreator],
+  );
 
   const openPostMenu = useCallback((post: FeedPost) => {
     setPostMenuPost(post);
@@ -1224,19 +1813,24 @@ export function FeedScreen({
     setPostMenuPost(null);
   }, [postMenuPost]);
 
-  const updatePostInFeed = useCallback((updatedPost: FeedPost | null) => {
-    if (!updatedPost) return;
+  const updatePostInFeed = useCallback(
+    (updatedPost: FeedPost | null) => {
+      if (!updatedPost) return;
 
-    setPosts((current) =>
-      current
-        .map((post) =>
-          post.id === updatedPost.id ? updatedPost : post,
-        )
-        .filter((post) => !post.archived),
-    );
+      const resolvedPost = resolvePostCreator(updatedPost);
 
-    setPostMenuPost(null);
-  }, []);
+      setPosts((current) =>
+        current
+          .map((post) =>
+            post.id === resolvedPost.id ? resolvedPost : post,
+          )
+          .filter((post) => !post.archived),
+      );
+
+      setPostMenuPost(null);
+    },
+    [resolvePostCreator],
+  );
 
   const handleSetPostAudience = useCallback(
     async (audience: FeedPostAudience) => {
@@ -1264,6 +1858,17 @@ export function FeedScreen({
     if (!postMenuPost) return;
 
     const updatedPost = await toggleFeedPostNotifications(postMenuPost.id);
+    updatePostInFeed(updatedPost);
+  }, [postMenuPost, updatePostInFeed]);
+
+  const handleTogglePostReshare = useCallback(async () => {
+    if (!postMenuPost) return;
+
+    const updatedPost = await setFeedPostReshareAllowed(
+      postMenuPost.id,
+      postMenuPost.allowReshare === false,
+    );
+
     updatePostInFeed(updatedPost);
   }, [postMenuPost, updatePostInFeed]);
 
@@ -1350,9 +1955,11 @@ export function FeedScreen({
 
       if (!updatedPost) return;
 
+      const resolvedPost = resolvePostCreator(updatedPost);
+
       setPosts((current) =>
         current.map((item) =>
-          item.id === updatedPost.id ? updatedPost : item,
+          item.id === resolvedPost.id ? resolvedPost : item,
         ),
       );
     } catch {
@@ -1668,14 +2275,45 @@ export function FeedScreen({
         "[NEXCHAT FEED] loadFeedPosts DONE",
         loadedPosts.length,
       );
-      setPosts(loadedPosts.filter((post) => !post.archived));
+      const contactIds = st.contacts
+        .filter((contact) => !contact.blocked)
+        .map((contact) => contact.id);
+
+      const resolvedPosts = loadedPosts.map((post) =>
+        post.creator.id === creator.id
+          ? {
+              ...post,
+              creator,
+            }
+          : post,
+      );
+
+      const visiblePosts = resolvedPosts.filter(
+        (post) =>
+          !post.archived &&
+          canUserSeeFeedPost(post, {
+            identityId: creator.id,
+            contactIds,
+            blockedIds: st.blockedIds,
+          }),
+      );
+
+      console.log(
+        "[NEXCHAT FEED] audience filter",
+        loadedPosts.length,
+        "loaded ->",
+        visiblePosts.length,
+        "visible",
+      );
+
+      setPosts(visiblePosts);
     } catch (error) {
       console.log("[NEXCHAT FEED] refresh ERROR", error);
     } finally {
       console.log("[NEXCHAT FEED] refresh FINALLY - setting loading FALSE");
       setLoading(false);
     }
-  }, []);
+  }, [creator, st.blockedIds, st.contacts]);
 
   useEffect(() => {
     refresh();
@@ -1684,6 +2322,47 @@ export function FeedScreen({
   useEffect(() => {
     console.log("[NEXCHAT FEED] loading STATE =", loading);
   }, [loading]);
+
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+
+  const visiblePosts = useMemo(() => {
+    if (!normalizedSearchQuery) {
+      return posts;
+    }
+
+    return posts.filter((post) => {
+      const searchableText = [
+        post.text,
+        post.creator.name,
+        post.creator.username,
+        post.linkTitle,
+        post.linkDescription,
+        post.attachment?.name,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return searchableText.includes(normalizedSearchQuery);
+    });
+  }, [posts, normalizedSearchQuery]);
+
+  const handleSearchSubmit = useCallback(async () => {
+    const normalized = searchQuery.trim();
+
+    if (!normalized) {
+      return;
+    }
+
+    await saveRecentFeedSearch(normalized);
+    setRecentSearches(await loadRecentFeedSearches());
+    setShowRecentSearches(true);
+  }, [searchQuery]);
+
+  const handleRemoveRecentSearch = useCallback(async (query: string) => {
+    await removeRecentFeedSearch(query);
+    setRecentSearches(await loadRecentFeedSearches());
+  }, []);
 
   const resetComposer = () => {
     setText("");
@@ -1778,6 +2457,71 @@ export function FeedScreen({
     }
   };
 
+  const pickFile = async () => {
+    if (publishing) return;
+
+    setPublishing(true);
+
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "*/*",
+        multiple: false,
+        copyToCacheDirectory: true,
+      });
+
+      console.log("[NEXCHAT FEED] FILE PICKER RESULT", result);
+
+      if (result.canceled || !result.assets?.[0]) {
+        return;
+      }
+
+      const file = result.assets[0];
+
+      console.log("[NEXCHAT FEED] PICKED FILE", {
+        uri: file.uri,
+        name: file.name,
+        mimeType: file.mimeType,
+        size: file.size,
+      });
+
+      const ingested = await ingestAttachment({
+        uri: file.uri,
+        name: file.name,
+        mimeType: file.mimeType ?? undefined,
+        size: file.size ?? undefined,
+        type: "file",
+      });
+
+      console.log("[NEXCHAT FEED] FILE INGESTED", {
+        id: ingested.attachment.id,
+        uri: ingested.attachment.uri,
+        name: ingested.attachment.name,
+        mimeType: ingested.attachment.mimeType,
+        size: ingested.attachment.size,
+      });
+
+      setAttachment({
+        uri: ingested.attachment.uri,
+        name: ingested.attachment.name,
+        mimeType: ingested.attachment.mimeType,
+        size: ingested.attachment.size,
+        kind: "file",
+      });
+
+      setOverlayText("");
+      setOverlayX(0.5);
+      setOverlayY(0.5);
+    } catch (error) {
+      console.log("[NEXCHAT FEED] FILE PICKER ERROR", error);
+      Alert.alert(
+        "File picker error",
+        "NexChat could not open the document picker.",
+      );
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   const beginEditPost = useCallback((post: FeedPost) => {
     setPostMenuPost(null);
     setEditingPost(post);
@@ -1806,7 +2550,7 @@ export function FeedScreen({
       return;
     }
 
-    const editedAttachment = attachment
+    let editedAttachment = attachment
       ? {
           ...attachment,
           overlayText: overlayText.trim() || undefined,
@@ -1818,12 +2562,119 @@ export function FeedScreen({
     setPublishing(true);
 
     try {
+      const cleanLink = linkUrl.match(/https?:\/\/[^\s]+/i)?.[0]?.trim() || "";
+      let editedType: FeedPostType = type;
+
+      const resolvedLink = cleanLink
+        ? await resolveLinkMetadata(cleanLink)
+        : null;
+
+      if (
+        resolvedLink &&
+        !editedAttachment
+      ) {
+        if (resolvedLink.isDirectMedia) {
+          const downloadedUri =
+            await downloadDirectLink(resolvedLink);
+
+          const ingested =
+            await ingestAttachment({
+              uri: downloadedUri,
+              name:
+                resolvedLink.url
+                  .split("?")[0]
+                  .split("/")
+                  .pop() || undefined,
+              mimeType:
+                resolvedLink.mimeType ||
+                (resolvedLink.kind === "image"
+                  ? "image/jpeg"
+                  : resolvedLink.kind === "video"
+                    ? "video/mp4"
+                    : resolvedLink.kind === "audio"
+                      ? "audio/mpeg"
+                      : "application/octet-stream"),
+              type:
+                resolvedLink.kind === "image" ||
+                resolvedLink.kind === "video" ||
+                resolvedLink.kind === "audio" ||
+                resolvedLink.kind === "file"
+                  ? resolvedLink.kind
+                  : "file",
+            });
+
+          editedAttachment = {
+            uri: ingested.attachment.uri,
+            name: ingested.attachment.name,
+            mimeType: ingested.attachment.mimeType,
+            size: ingested.attachment.size,
+            kind:
+              resolvedLink.kind === "image" ||
+              resolvedLink.kind === "video" ||
+              resolvedLink.kind === "audio" ||
+              resolvedLink.kind === "file"
+                ? resolvedLink.kind
+                : "file",
+            overlayText: overlayText.trim() || undefined,
+            overlayX,
+            overlayY,
+          };
+
+          editedType = "media";
+        } else if (resolvedLink.imageUri) {
+          editedAttachment = {
+            uri: resolvedLink.imageUri,
+            name: `${resolvedLink.provider || resolvedLink.siteName || "link"}-media`,
+            kind: "image",
+            mimeType: "image/jpeg",
+            overlayText: overlayText.trim() || undefined,
+            overlayX,
+            overlayY,
+          };
+
+          editedType = "media";
+        } else if (cleanLink && !cleanText) {
+          console.log(
+            "[NEXCHAT LINK MEDIA] MEDIA NOT INGESTED - FALLING BACK TO LINK",
+            {
+              link: cleanLink,
+              resolvedKind: resolvedLink.kind,
+              provider:
+                resolvedLink.provider ||
+                resolvedLink.siteName ||
+                null,
+              imageUri: resolvedLink.imageUri || null,
+            },
+          );
+        }
+      }
+
       const updatedPost = await updateFeedPost(
         editingPost.id,
         {
-          type,
+          type: editedType,
           text: cleanText,
-          linkUrl: linkUrl.trim(),
+          linkUrl:
+            editedType === "media"
+              ? undefined
+              : cleanLink || undefined,
+          linkTitle:
+            editedType === "media"
+              ? undefined
+              : resolvedLink?.title,
+          linkDescription:
+            editedType === "media"
+              ? undefined
+              : resolvedLink?.description,
+          linkImageUri:
+            editedType === "media"
+              ? undefined
+              : resolvedLink?.imageUri,
+          linkProvider:
+            editedType === "media"
+              ? undefined
+              : resolvedLink?.provider ||
+                resolvedLink?.siteName,
           attachment: editedAttachment,
           attachments: editedAttachment
             ? [editedAttachment]
@@ -1832,10 +2683,12 @@ export function FeedScreen({
       );
 
       if (updatedPost) {
+        const resolvedPost = resolvePostCreator(updatedPost);
+
         setPosts((current) =>
           current.map((post) =>
-            post.id === updatedPost.id
-              ? updatedPost
+            post.id === resolvedPost.id
+              ? resolvedPost
               : post,
           ),
         );
@@ -1850,32 +2703,157 @@ export function FeedScreen({
 
   const publish = async (type: FeedPostType) => {
     const cleanText = text.trim();
+    const cleanLink = linkUrl.match(/https?:\/\/[^\s]+/i)?.[0]?.trim() || "";
 
-    if (!cleanText && !attachment) {
+    if (!cleanText && !attachment && !cleanLink) {
       return;
     }
 
-    const publishAttachment = attachment
-      ? {
-          ...attachment,
-          overlayText: overlayText.trim() || undefined,
-          overlayX,
-          overlayY,
-        }
-      : undefined;
-
     setPublishing(true);
+
     try {
+      let publishAttachment = attachment
+        ? {
+            ...attachment,
+            overlayText: overlayText.trim() || undefined,
+            overlayX,
+            overlayY,
+          }
+        : undefined;
+
+      let publishType: FeedPostType = type;
+
+      const resolvedLink = cleanLink
+        ? await resolveLinkMetadata(cleanLink)
+        : null;
+
+      if (
+        resolvedLink &&
+        !publishAttachment
+      ) {
+        if (resolvedLink.isDirectMedia) {
+          const downloadedUri =
+            await downloadDirectLink(resolvedLink);
+
+          const ingested =
+            await ingestAttachment({
+              uri: downloadedUri,
+              name:
+                resolvedLink.url
+                  .split("?")[0]
+                  .split("/")
+                  .pop() || undefined,
+              mimeType:
+                resolvedLink.mimeType ||
+                (resolvedLink.kind === "image"
+                  ? "image/jpeg"
+                  : resolvedLink.kind === "video"
+                    ? "video/mp4"
+                    : resolvedLink.kind === "audio"
+                      ? "audio/mpeg"
+                      : "application/octet-stream"),
+              type:
+                resolvedLink.kind === "image" ||
+                resolvedLink.kind === "video" ||
+                resolvedLink.kind === "audio" ||
+                resolvedLink.kind === "file"
+                  ? resolvedLink.kind
+                  : "file",
+            });
+
+          publishAttachment = {
+            uri: ingested.attachment.uri,
+            name: ingested.attachment.name,
+            mimeType: ingested.attachment.mimeType,
+            size: ingested.attachment.size,
+            kind:
+              resolvedLink.kind === "image" ||
+              resolvedLink.kind === "video" ||
+              resolvedLink.kind === "audio" ||
+              resolvedLink.kind === "file"
+                ? resolvedLink.kind
+                : "file",
+            overlayText: overlayText.trim() || undefined,
+            overlayX,
+            overlayY,
+          };
+
+          publishType = "media";
+        } else if (resolvedLink.imageUri) {
+          publishAttachment = {
+            uri: resolvedLink.imageUri,
+            name: `${resolvedLink.provider || resolvedLink.siteName || "link"}-media`,
+            kind: "image",
+            mimeType: "image/jpeg",
+            overlayText: overlayText.trim() || undefined,
+            overlayX,
+            overlayY,
+          };
+
+          publishType = "media";
+        } else if (cleanLink && !cleanText) {
+          console.log(
+            "[NEXCHAT LINK MEDIA] MEDIA NOT INGESTED - FALLING BACK TO LINK",
+            {
+              link: cleanLink,
+              resolvedKind: resolvedLink.kind,
+              provider:
+                resolvedLink.provider ||
+                resolvedLink.siteName ||
+                null,
+              imageUri: resolvedLink.imageUri || null,
+            },
+          );
+        }
+      }
+
+      console.log("[NEXCHAT LINK MEDIA] PUBLISH", {
+        link: cleanLink || null,
+        resolvedKind: resolvedLink?.kind || null,
+        attachmentUri: publishAttachment?.uri || null,
+        attachmentKind: publishAttachment?.kind || null,
+        attachmentMimeType: publishAttachment?.mimeType || null,
+        publishType,
+      });
+
       await createFeedPost({
-        type,
+        type: publishType,
         creator,
         text: cleanText,
+        linkUrl:
+          publishType === "media"
+            ? undefined
+            : cleanLink || undefined,
+        linkTitle:
+          publishType === "media"
+            ? undefined
+            : resolvedLink?.title,
+        linkDescription:
+          publishType === "media"
+            ? undefined
+            : resolvedLink?.description,
+        linkImageUri:
+          publishType === "media"
+            ? undefined
+            : resolvedLink?.imageUri,
+        linkProvider:
+          publishType === "media"
+            ? undefined
+            : resolvedLink?.provider ||
+              resolvedLink?.siteName,
         attachment: publishAttachment,
       });
 
       await refresh();
       resetComposer();
       setComposerOpen(false);
+    } catch (error) {
+      Alert.alert(
+        "Could not publish",
+        error instanceof Error
+          ? error.message
+          : "NexChat could not download or publish that link.",
+      );
     } finally {
       setPublishing(false);
     }
@@ -1908,8 +2886,6 @@ export function FeedScreen({
     let bestVisibility = 0;
 
     for (const post of posts) {
-      if (!postHasVideo(post)) continue;
-
       const layout = postLayoutsRef.current[post.id];
 
       if (!layout || layout.height <= 0) continue;
@@ -1924,6 +2900,31 @@ export function FeedScreen({
       );
 
       const visibility = visibleHeight / layout.height;
+
+      if (
+        visibility >= 0.5 &&
+        !viewedPostIdsRef.current.has(post.id)
+      ) {
+        viewedPostIdsRef.current.add(post.id);
+
+        void incrementFeedPostView(post.id).then((updatedPost) => {
+          if (!updatedPost) return;
+
+          const resolvedPost = resolvePostCreator(updatedPost);
+
+          setPosts((current) =>
+            current.map((item) =>
+              item.id === resolvedPost.id
+                ? resolvedPost
+                : item,
+            ),
+          );
+        });
+      }
+
+      if (!postHasVideo(post)) continue;
+
+      if (!layout || layout.height <= 0) continue;
 
       visibilityByPost[post.id] = visibility;
 
@@ -2077,11 +3078,88 @@ export function FeedScreen({
           },
         ]}
       >
-        <View>
-          <Text style={[styles.title, { color: theme.ink }]}>Feed</Text>
-          <Text style={[styles.subtitle, { color: theme.muted }]}>
-            Your social space
-          </Text>
+        <View
+          style={{
+            flex: 1,
+            flexDirection: "row",
+            alignItems: "center",
+          }}
+        >
+          <View style={{ flexShrink: 0, paddingRight: 12 }}>
+            <Pressable
+              onPress={() => {
+                setSearchQuery("");
+                refresh();
+              }}
+              hitSlop={8}
+            >
+              <Text style={[styles.title, { color: theme.ink }]}>Feed</Text>
+            </Pressable>
+
+            <Text style={[styles.subtitle, { color: theme.muted }]}>
+              Your social space
+            </Text>
+          </View>
+
+          <View
+            style={[
+              styles.feedSearch,
+              {
+                flex: 1,
+                marginTop: 0,
+                backgroundColor: theme.bg,
+                borderColor: theme.line,
+              },
+            ]}
+          >
+            <Text style={[styles.feedSearchIcon, { color: theme.muted }]}>
+              ⌕
+            </Text>
+
+            <TextInput
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              placeholder="Search posts"
+              placeholderTextColor={theme.muted}
+              style={[styles.feedSearchInput, { color: theme.ink }]}
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="search"
+            />
+
+            {searchQuery.length > 0 ? (
+              <Pressable
+                onPress={() => setSearchQuery("")}
+                hitSlop={8}
+              >
+                <Text
+                  style={[
+                    styles.feedSearchClear,
+                    { color: theme.muted },
+                  ]}
+                >
+                  ×
+                </Text>
+              </Pressable>
+            ) : null}
+
+            <Pressable
+              onPress={() =>
+                setShowRecentSearches((current) => !current)
+              }
+              hitSlop={8}
+              style={styles.feedSearchDropdownButton}
+            >
+              <Text
+                style={[
+                  styles.feedSearchDropdown,
+                  { color: theme.muted },
+                ]}
+              >
+                ▾
+              </Text>
+            </Pressable>
+          </View>
         </View>
 
       </View>
@@ -2093,7 +3171,7 @@ export function FeedScreen({
             Loading feed…
           </Text>
         </View>
-      ) : posts.length === 0 ? (
+      ) : visiblePosts.length === 0 ? (
         <View style={styles.center}>
           <Text style={[styles.emptyIcon, { color: theme.brand }]}>▦</Text>
 
@@ -2125,13 +3203,14 @@ export function FeedScreen({
           scrollEventThrottle={16}
           showsVerticalScrollIndicator={false}
         >
-          {posts.map((post) => (
+          {visiblePosts.map((post) => (
             <PostCard
               key={post.id}
               post={post}
               theme={theme}
               userId={creator.id}
               onLike={handlePostLike}
+              onReshare={handlePostReshare}
               onComments={openComments}
               onShare={openShareMenu}
               onProfile={handleOpenProfile}
@@ -2237,6 +3316,22 @@ export function FeedScreen({
                     ]}
                   >
                     Audience
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={handleTogglePostReshare}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    {postMenuPost?.allowReshare === false
+                      ? "Allow reshare"
+                      : "Turn off reshare"}
                   </Text>
                 </Pressable>
 
@@ -2450,37 +3545,7 @@ export function FeedScreen({
               </View>
             </Pressable>
 
-            <Pressable
-              style={styles.postMenuItem}
-              onPress={() => handleSetPostAudience("my_university")}
-            >
-              <View style={styles.audienceOptionRow}>
-                <View style={styles.audienceOptionText}>
-                  <Text
-                    style={[
-                      styles.postMenuItemText,
-                      { color: theme.ink },
-                    ]}
-                  >
-                    My university
-                  </Text>
-                  <Text
-                    style={[
-                      styles.audienceOptionDescription,
-                      { color: theme.muted },
-                    ]}
-                  >
-                    People from your university
-                  </Text>
-                </View>
 
-                {audiencePost?.audience === "my_university" ? (
-                  <Text style={[styles.audienceCheck, { color: theme.brand }]}>
-                    ✓
-                  </Text>
-                ) : null}
-              </View>
-            </Pressable>
 
             <Pressable
               style={styles.postMenuItem}
@@ -3171,7 +4236,7 @@ export function FeedScreen({
                         style={styles.mediaEditorImage}
                         resizeMode="cover"
                       />
-                    ) : (
+                    ) : attachment.kind === "video" ? (
                       <View style={styles.mediaEditorVideoPlaceholder}>
                         <Text style={styles.mediaEditorVideoIcon}>🎥</Text>
                         <Text
@@ -3181,6 +4246,19 @@ export function FeedScreen({
                           ]}
                         >
                           Video selected
+                        </Text>
+                      </View>
+                    ) : (
+                      <View style={styles.mediaEditorVideoPlaceholder}>
+                        <Text style={styles.mediaEditorVideoIcon}>📄</Text>
+                        <Text
+                          style={[
+                            styles.mediaEditorVideoText,
+                            { color: theme.ink },
+                          ]}
+                          numberOfLines={2}
+                        >
+                          {attachment.name || "Document selected"}
                         </Text>
                       </View>
                     )}
@@ -3229,6 +4307,34 @@ export function FeedScreen({
                     },
                   ]}
                 />
+
+                <Text
+                  style={[
+                    styles.createPostCaption,
+                    { color: theme.muted, marginTop: 12 },
+                  ]}
+                >
+                  Link
+                </Text>
+
+                <TextInput
+                  value={linkUrl}
+                  onChangeText={setLinkUrl}
+                  placeholder="Paste a link to turn it into media"
+                  placeholderTextColor={theme.muted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="url"
+                  style={[
+                    styles.textInput,
+                    {
+                      color: theme.ink,
+                      borderColor: theme.line,
+                      backgroundColor: theme.bg,
+                      minHeight: 48,
+                    },
+                  ]}
+                />
               </View>
 
               <View style={styles.composerTools}>
@@ -3266,6 +4372,22 @@ export function FeedScreen({
                 </Pressable>
 
                 <Pressable
+                  onPress={() => void pickFile()}
+                  disabled={publishing}
+                  style={[
+                    styles.toolButton,
+                    {
+                      borderColor: theme.line,
+                      backgroundColor: theme.bg,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.toolText, { color: theme.ink }]}>
+                    📄 File
+                  </Text>
+                </Pressable>
+
+                <Pressable
                   onPress={() => void pickMedia("video")}
                   disabled={publishing}
                   style={[
@@ -3299,12 +4421,18 @@ export function FeedScreen({
                 <Pressable
                   onPress={() => {
                     const attachmentKind = attachment?.kind;
+                    const cleanText = text.trim();
+                    const cleanLink = linkUrl.match(/https?:\/\/[^\s]+/i)?.[0]?.trim() || "";
 
                     const postType: FeedPostType =
                       attachmentKind === "image" ||
-                      attachmentKind === "video"
+                      attachmentKind === "video" ||
+                      attachmentKind === "audio" ||
+                      attachmentKind === "file"
                         ? "media"
-                        : "text";
+                        : cleanLink && !cleanText
+                          ? "link"
+                          : "text";
 
                     if (editingPost) {
                       void saveEditedPost(postType);
@@ -3314,14 +4442,14 @@ export function FeedScreen({
                   }}
                   disabled={
                     publishing ||
-                    (!text.trim() && !attachment)
+                    (!text.trim() && !attachment && !linkUrl.trim())
                   }
                   style={[
                     styles.publishButton,
                     {
                       backgroundColor:
                         publishing ||
-                        (!text.trim() && !attachment)
+                        (!text.trim() && !attachment && !linkUrl.trim())
                           ? theme.muted
                           : theme.brand,
                     },
@@ -3622,6 +4750,8 @@ export function FeedScreen({
                 }
 
 const styles = StyleSheet.create({
+
+
   container: {
     flex: 1,
   },
@@ -3644,6 +4774,46 @@ const styles = StyleSheet.create({
   subtitle: {
     fontSize: 13,
     marginTop: 2,
+  },
+
+  feedSearch: {
+    height: 34,
+    marginTop: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+
+  feedSearchIcon: {
+    fontSize: 19,
+    marginRight: 7,
+    lineHeight: 20,
+  },
+
+  feedSearchInput: {
+    flex: 1,
+    height: 32,
+    paddingVertical: 0,
+    paddingHorizontal: 0,
+    fontSize: 13,
+  },
+
+  feedSearchClear: {
+    fontSize: 20,
+    lineHeight: 20,
+    marginLeft: 7,
+  },
+
+  feedSearchDropdownButton: {
+    marginLeft: 7,
+    paddingLeft: 2,
+  },
+
+  feedSearchDropdown: {
+    fontSize: 16,
+    lineHeight: 18,
   },
 
   floatingAddButton: {
@@ -3836,15 +5006,56 @@ const styles = StyleSheet.create({
     borderRadius: 13,
   },
 
+  linkCardHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+
+  linkDirectBadge: {
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+  },
+
+  linkPreviewImage: {
+    width: "100%",
+    height: 190,
+    backgroundColor: "#000",
+  },
+
+  linkCardContent: {
+    padding: 14,
+  },
+
+  linkTitle: {
+    fontSize: 17,
+    fontWeight: "800",
+    marginBottom: 6,
+  },
+
+  linkAction: {
+    marginTop: 10,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+
   linkLabel: {
     fontSize: 10,
     fontWeight: "900",
     marginBottom: 6,
   },
 
-  linkText: {
+  linkDescription: {
     fontSize: 14,
     lineHeight: 20,
+    marginBottom: 8,
+  },
+
+  linkUrl: {
+    fontSize: 11,
+    lineHeight: 16,
   },
 
   attachmentCard: {
@@ -3941,6 +5152,64 @@ const styles = StyleSheet.create({
     padding: 10,
     flexDirection: "row",
     alignItems: "center",
+  },
+
+  fileCard: {
+    width: "100%",
+    minHeight: 72,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 10,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  pdfPost: {
+    width: "100%",
+    borderWidth: 1,
+    borderRadius: 12,
+    overflow: "hidden",
+  },
+  pdfViewer: {
+    width: "100%",
+    height: 520,
+  },
+  pdfFooter: {
+    minHeight: 48,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  pdfName: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: "700",
+    marginRight: 12,
+  },
+  pdfPage: {
+    fontSize: 12,
+    fontWeight: "700",
+  },
+
+  fileIcon: {
+    width: 46,
+    height: 46,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  fileIconText: {
+    color: "#FFFFFF",
+    fontSize: 20,
+    fontWeight: "800",
+  },
+
+  fileInfo: {
+    flex: 1,
+    marginLeft: 12,
   },
 
   audioPlayButton: {
@@ -4612,6 +5881,27 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     marginTop: 18,
     opacity: 0.92,
+  },
+
+  feedVideoWatermark: {
+    position: "absolute",
+    left: "50%",
+    bottom: 18,
+    transform: [{ translateX: -70 }],
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    backgroundColor: "rgba(0,0,0,0.32)",
+  },
+
+  feedVideoWatermarkText: {
+    color: "#FFFFFF",
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 1.4,
+    textShadowColor: "rgba(0,0,0,0.8)",
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
   },
 
   mediaOverlayPreview: {
