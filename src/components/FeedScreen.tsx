@@ -31,7 +31,7 @@ import * as MediaLibrary from "expo-media-library";
 import * as Clipboard from "expo-clipboard";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { WebView } from "react-native-webview";
-const Pdf = null;
+import Pdf from "react-native-pdf";
 import {
 } from "../core/linkResolver";
 import { ingestAttachment } from "../core/attachmentIngestion";
@@ -1054,7 +1054,7 @@ function FeedVideo({
               togglePlayback();
             }, 280);
           }}
-          style={StyleSheet.absoluteFillObject}
+          style={StyleSheet.absoluteFill}
         >
           {!playing ? (
             <View
@@ -1091,6 +1091,9 @@ function FeedPdf({
   theme: FeedTheme;
 }) {
   const [busy, setBusy] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageCount, setPageCount] = useState(0);
+  const [viewerError, setViewerError] = useState(false);
 
   const handleShare = async () => {
     if (!attachment.uri || busy) return;
@@ -1121,70 +1124,29 @@ function FeedPdf({
     }
   };
 
-  const handleOpen = async () => {
-    if (!attachment.uri || busy) return;
+  const handlePdfLoadComplete = (numberOfPages: number) => {
+    setPageCount(numberOfPages);
+    setCurrentPage(1);
+    setViewerError(false);
+  };
 
-    setBusy(true);
+  const handlePdfPageChanged = (page: number, numberOfPages: number) => {
+    setCurrentPage(page);
 
-    try {
-      let targetUri = attachment.uri;
-
-      if (Platform.OS === "android" && attachment.uri.startsWith("file://")) {
-        targetUri = await FileSystem.getContentUriAsync(attachment.uri);
-      }
-
-      const canOpen = await Linking.canOpenURL(targetUri);
-
-      if (!canOpen) {
-        Alert.alert(
-          "No PDF app found",
-          "Install a PDF reader on this device or use Share to send the file to another app.",
-          [
-            { text: "Share", onPress: () => void handleShare() },
-            { text: "Cancel", style: "cancel" },
-          ],
-        );
-        return;
-      }
-
-      await Linking.openURL(targetUri);
-    } catch (error) {
-      console.error("[NEXCHAT FEED] PDF OPEN ERROR", error);
-      Alert.alert(
-        "Could not open PDF",
-        "NexChat could not open this PDF on the device.",
-        [
-          { text: "Share", onPress: () => void handleShare() },
-          { text: "Cancel", style: "cancel" },
-        ],
-      );
-    } finally {
-      setBusy(false);
+    if (numberOfPages > 0) {
+      setPageCount(numberOfPages);
     }
   };
 
-  const handlePress = () => {
-    if (busy) return;
-
-    Alert.alert(
-      attachment.name || "PDF document",
-      "What would you like to do?",
-      [
-        { text: "Open PDF", onPress: () => void handleOpen() },
-        { text: "Share", onPress: () => void handleShare() },
-        { text: "Cancel", style: "cancel" },
-      ],
-    );
+  const handlePdfError = (error: unknown) => {
+    console.error("[NEXCHAT FEED] PDF VIEWER ERROR", error);
+    setViewerError(true);
   };
 
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={`PDF document ${attachment.name || "Document.pdf"}`}
-      onPress={handlePress}
-      disabled={busy}
+    <View
       style={[
-        styles.fileCard,
+        styles.pdfFeedCard,
         {
           backgroundColor: theme.bg,
           borderColor: theme.line,
@@ -1194,28 +1156,145 @@ function FeedPdf({
     >
       <View
         style={[
-          styles.fileIcon,
+          styles.pdfFeedHeader,
           {
-            backgroundColor: theme.brand,
+            borderBottomColor: theme.line,
           },
         ]}
       >
-        <Text style={styles.fileIconText}>PDF</Text>
-      </View>
+        <View style={styles.pdfFeedHeaderInfo}>
+          <Text
+            style={[styles.pdfName, { color: theme.ink }]}
+            numberOfLines={1}
+          >
+            {attachment.name || "PDF document"}
+          </Text>
 
-      <View style={styles.fileInfo}>
-        <Text
-          style={[styles.attachmentName, { color: theme.ink }]}
-          numberOfLines={2}
+          <Text style={[styles.pdfFeedHint, { color: theme.muted }]}>
+            {pageCount > 1
+              ? `Swipe left to read • Page ${currentPage} of ${pageCount}`
+              : "Document"}
+          </Text>
+        </View>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Share PDF"
+          onPress={() => void handleShare()}
+          disabled={busy}
+          style={styles.pdfHeaderButton}
         >
-          {attachment.name || "Document.pdf"}
-        </Text>
-
-        <Text style={[styles.attachmentType, { color: theme.muted }]}>
-          {busy ? "Opening…" : "Tap to open or share"}
-        </Text>
+          <Text style={[styles.pdfMoreText, { color: theme.brand }]}>
+            ⋯
+          </Text>
+        </Pressable>
       </View>
-    </Pressable>
+
+      <View style={styles.pdfInlineViewer}>
+        {viewerError ? (
+          <View style={styles.pdfErrorState}>
+            <Text style={[styles.pdfErrorTitle, { color: theme.ink }]}>
+              Could not display PDF
+            </Text>
+
+            <Text
+              style={[
+                styles.pdfErrorMessage,
+                { color: theme.muted },
+              ]}
+            >
+              NexChat could not render this document.
+            </Text>
+
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Share PDF"
+              onPress={() => void handleShare()}
+              style={[
+                styles.pdfErrorButton,
+                {
+                  backgroundColor: theme.brand,
+                },
+              ]}
+            >
+              <Text style={styles.pdfErrorButtonText}>
+                Share PDF
+              </Text>
+            </Pressable>
+          </View>
+        ) : attachment.uri ? (
+          <Pdf
+            source={{
+              uri: attachment.uri,
+              cache: false,
+            }}
+            style={styles.pdfInlineNativeViewer}
+            enablePaging={true}
+            horizontal={true}
+            fitPolicy={0}
+            page={1}
+            onLoadComplete={handlePdfLoadComplete}
+            onPageChanged={handlePdfPageChanged}
+            onError={handlePdfError}
+          />
+        ) : (
+          <View style={styles.pdfErrorState}>
+            <Text style={[styles.pdfErrorTitle, { color: theme.ink }]}>
+              PDF unavailable
+            </Text>
+
+            <Text
+              style={[
+                styles.pdfErrorMessage,
+                { color: theme.muted },
+              ]}
+            >
+              This attachment no longer has a local file available.
+            </Text>
+          </View>
+        )}
+
+        {!viewerError && !pageCount ? (
+          <View
+            pointerEvents="none"
+            style={styles.pdfLoadingOverlay}
+          >
+            <ActivityIndicator
+              size="large"
+              color={theme.brand}
+            />
+
+            <Text
+              style={[
+                styles.pdfLoadingText,
+                { color: theme.muted },
+              ]}
+            >
+              Loading PDF…
+            </Text>
+          </View>
+        ) : null}
+      </View>
+
+      {pageCount > 0 ? (
+        <View
+          style={[
+            styles.pdfFooter,
+            {
+              borderTopColor: theme.line,
+            },
+          ]}
+        >
+          <Text style={[styles.pdfPageHint, { color: theme.muted }]}>
+            Swipe left to continue
+          </Text>
+
+          <Text style={[styles.pdfPage, { color: theme.muted }]}>
+            {currentPage} / {pageCount}
+          </Text>
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -5200,15 +5279,147 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     overflow: "hidden",
   },
-  pdfViewer: {
+  pdfModal: {
+    flex: 1,
+  },
+  pdfHeader: {
+    minHeight: 58,
+    paddingHorizontal: 10,
+    borderBottomWidth: 1,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  pdfHeaderButton: {
+    minWidth: 58,
+    height: 48,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  pdfHeaderButtonText: {
+    fontSize: 38,
+    fontWeight: "300",
+    lineHeight: 42,
+  },
+  pdfHeaderTitle: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: "700",
+    textAlign: "center",
+    marginHorizontal: 8,
+  },
+  pdfMoreText: {
+    fontSize: 28,
+    fontWeight: "700",
+    lineHeight: 32,
+  },
+  pdfViewerArea: {
+    flex: 1,
+    position: "relative",
+    overflow: "hidden",
+  },
+  pdfNativeViewer: {
+    flex: 1,
+    width: "100%",
+  },
+
+  pdfFeedCard: {
+    width: "100%",
+    borderWidth: 1,
+    borderRadius: 14,
+    overflow: "hidden",
+  },
+
+  pdfFeedHeader: {
+    minHeight: 52,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderBottomWidth: 1,
+  },
+
+  pdfFeedHeaderInfo: {
+    flex: 1,
+    minWidth: 0,
+    marginRight: 8,
+  },
+
+  pdfFeedHint: {
+    marginTop: 2,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+
+  pdfInlineViewer: {
     width: "100%",
     height: 520,
+    position: "relative",
+    overflow: "hidden",
+  },
+
+  pdfInlineNativeViewer: {
+    flex: 1,
+    width: "100%",
+    height: "100%",
+  },
+
+  pdfPageHint: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  pdfLoadingOverlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  pdfLoadingText: {
+    marginTop: 10,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  pdfErrorState: {
+    flex: 1,
+    paddingHorizontal: 28,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  pdfErrorTitle: {
+    fontSize: 18,
+    fontWeight: "800",
+    textAlign: "center",
+    marginBottom: 8,
+  },
+  pdfErrorMessage: {
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: "center",
+    marginBottom: 20,
+  },
+  pdfErrorButton: {
+    minHeight: 46,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  pdfErrorButtonText: {
+    color: "#FFFFFF",
+    fontSize: 14,
+    fontWeight: "800",
   },
   pdfFooter: {
-    minHeight: 48,
+    minHeight: 72,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderTopWidth: 1,
+  },
+  pdfFooterTop: {
+    minHeight: 24,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
@@ -5222,6 +5433,30 @@ const styles = StyleSheet.create({
   pdfPage: {
     fontSize: 12,
     fontWeight: "700",
+  },
+  pdfPageIndicatorRow: {
+    minHeight: 28,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  pdfSwipeHint: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  pdfDots: {
+    maxWidth: 120,
+    marginLeft: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+  },
+  pdfDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginLeft: 4,
   },
 
   fileIcon: {
@@ -5876,7 +6111,7 @@ const styles = StyleSheet.create({
   },
 
   feedVideoEndCard: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "rgba(0,0,0,0.72)",

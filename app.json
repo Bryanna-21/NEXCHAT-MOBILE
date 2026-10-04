@@ -20,12 +20,22 @@
     "plugins": [
       "expo-audio",
       "expo-asset",
-      "expo-secure-store"
+      "expo-secure-store",
+      "react-native-blob-util",
+      "expo-sharing",
+      "expo-status-bar",
+      "expo-video"
     ],
     "extra": {
       "eas": {
         "projectId": "95b15e11-4dcd-4ed4-887a-e327d4b6be66"
       }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/95b15e11-4dcd-4ed4-887a-e327d4b6be66"
     }
   }
 }
