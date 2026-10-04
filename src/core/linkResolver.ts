@@ -87,6 +87,108 @@ function getTikTokVideoId(url: string): string | undefined {
   }
 }
 
+function extractCanonicalUrl(
+  html: string,
+  baseUrl: string,
+): string | undefined {
+  const patterns = [
+    /<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i,
+    /<meta[^>]+property=["']og:url["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:url["']/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+
+    if (!match?.[1]) {
+      continue;
+    }
+
+    try {
+      const canonical = new URL(match[1], baseUrl).toString();
+
+      if (
+        canonical.startsWith("http://") ||
+        canonical.startsWith("https://")
+      ) {
+        return cleanUrl(canonical);
+      }
+    } catch {
+      // Try the next canonical URL candidate.
+    }
+  }
+
+  return undefined;
+}
+
+async function followRedirects(value: string): Promise<string> {
+  const url = cleanUrl(value);
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+    });
+
+    const responseUrl = cleanUrl(response.url || "");
+
+    if (responseUrl && responseUrl !== url) {
+      return responseUrl;
+    }
+
+    const contentType =
+      response.headers.get("content-type")?.toLowerCase() || "";
+
+    if (contentType.includes("text/html")) {
+      const html = await response.text();
+      const canonicalUrl = extractCanonicalUrl(html, url);
+
+      if (canonicalUrl) {
+        return canonicalUrl;
+      }
+    }
+
+    return responseUrl || url;
+  } catch {
+    return url;
+  }
+}
+
+function extractTikTokMediaUrl(html: string): string | undefined {
+  const patterns = [
+    /"downloadAddr"\s*:\s*"([^"]+)"/i,
+    /"playAddr"\s*:\s*"([^"]+)"/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+
+    if (!match?.[1]) {
+      continue;
+    }
+
+    try {
+      /*
+       * TikTok escapes URL separators inside its embedded JSON,
+       * for example \u002F for "/". JSON.parse decodes these safely.
+       */
+      const decoded = JSON.parse(`"${match[1]}"`);
+      const mediaUrl = new URL(decoded);
+
+      if (
+        mediaUrl.protocol === "http:" ||
+        mediaUrl.protocol === "https:"
+      ) {
+        return mediaUrl.toString();
+      }
+    } catch {
+      // Try the next embedded media candidate.
+    }
+  }
+
+  return undefined;
+}
+
 function hasExtension(pathname: string, extensions: string[]): boolean {
   return extensions.some((extension) => pathname.endsWith(extension));
 }
@@ -337,12 +439,190 @@ export function resolveLink(value: string): ResolvedLink | null {
 export async function resolveLinkMetadata(
   value: string,
 ): Promise<ResolvedLink | null> {
-  const resolved = resolveLink(value);
+  const normalizedUrl = await followRedirects(value);
+  let resolved = resolveLink(normalizedUrl);
 
   if (!resolved) return null;
 
   if (resolved.isDirectMedia) {
     return resolved;
+  }
+
+  /*
+   * TikTok pages embed signed media resources in their page data.
+   *
+   * oEmbed only provides presentation metadata, so it cannot satisfy
+   * NexChat's native-media ingestion path. When TikTok exposes an actual
+   * downloadable/playable media resource, extract and verify it here.
+   */
+  if (resolved.kind === "tiktok") {
+    try {
+      console.log("[NEXCHAT LINK RESOLVER] TIKTOK START", {
+        url: resolved.url,
+      });
+
+      const fetchTikTokPage = async (
+        pageUrl: string,
+      ): Promise<{ html: string; canonicalUrl?: string }> => {
+        const response = await fetch(pageUrl, {
+          method: "GET",
+        });
+
+        if (!response.ok) {
+          console.log("[NEXCHAT LINK RESOLVER] TIKTOK PAGE FAILED", {
+            url: pageUrl,
+            status: response.status,
+          });
+
+          return { html: "" };
+        }
+
+        const html = await response.text();
+        const canonicalUrl = extractCanonicalUrl(html, pageUrl);
+        const contentType =
+          response.headers.get("content-type")?.toLowerCase() || "";
+
+        console.log("[NEXCHAT LINK RESOLVER] TIKTOK PAGE", {
+          url: pageUrl,
+          status: response.status,
+          contentType,
+          htmlLength: html.length,
+          canonicalUrl: canonicalUrl || null,
+          startsWith: html.slice(0, 180),
+        });
+
+        return {
+          html,
+          canonicalUrl,
+        };
+      };
+
+      const extractVerifiedVideo = async (
+        html: string,
+      ): Promise<ResolvedLink | null> => {
+        if (!html) {
+          return null;
+        }
+
+        const mediaUrl = extractTikTokMediaUrl(html);
+
+        console.log("[NEXCHAT LINK RESOLVER] TIKTOK MEDIA CANDIDATE", {
+          found: Boolean(mediaUrl),
+        });
+
+        if (!mediaUrl) {
+          return null;
+        }
+
+        try {
+          const mediaResponse = await fetch(mediaUrl, {
+            method: "GET",
+          });
+
+          if (!mediaResponse.ok) {
+            console.log(
+              "[NEXCHAT LINK RESOLVER] TIKTOK MEDIA VERIFY FAILED",
+              {
+                status: mediaResponse.status,
+              },
+            );
+
+            return null;
+          }
+
+          const mediaContentType =
+            mediaResponse.headers.get("content-type")?.toLowerCase() || "";
+
+          const mediaKind =
+            mediaKindFromContentType(mediaContentType);
+
+          console.log("[NEXCHAT LINK RESOLVER] TIKTOK MEDIA VERIFIED", {
+            contentType: mediaContentType,
+            kind: mediaKind,
+          });
+
+          if (mediaKind !== "video") {
+            return null;
+          }
+
+          return {
+            ...resolved,
+            url: mediaUrl,
+            kind: "video",
+            isDirectMedia: true,
+            mimeType:
+              mediaContentType.split(";")[0].trim() || "video/mp4",
+            provider: undefined,
+            siteName: undefined,
+            videoId: undefined,
+            title: undefined,
+            description: undefined,
+            imageUri: undefined,
+          };
+        } catch (error) {
+          console.log(
+            "[NEXCHAT LINK RESOLVER] TIKTOK MEDIA VERIFY ERROR",
+            String(error),
+          );
+
+          return null;
+        }
+      };
+
+      /*
+       * First inspect the exact URL the user pasted. This is important
+       * for vm.tiktok.com short links because React Native fetch does not
+       * always expose the final redirect URL through response.url.
+       */
+      const firstPage = await fetchTikTokPage(resolved.url);
+
+      const directVideo =
+        await extractVerifiedVideo(firstPage.html);
+
+      if (directVideo) {
+        console.log(
+          "[NEXCHAT LINK RESOLVER] TIKTOK DIRECT MEDIA SUCCESS",
+        );
+
+        return directVideo;
+      }
+
+      /*
+       * If the short-link page itself does not contain the media data,
+       * follow its canonical URL explicitly and inspect that page.
+       */
+      if (
+        firstPage.canonicalUrl &&
+        firstPage.canonicalUrl !== resolved.url
+      ) {
+        const canonicalPage =
+          await fetchTikTokPage(firstPage.canonicalUrl);
+
+        const canonicalVideo =
+          await extractVerifiedVideo(canonicalPage.html);
+
+        if (canonicalVideo) {
+          console.log(
+            "[NEXCHAT LINK RESOLVER] TIKTOK CANONICAL MEDIA SUCCESS",
+          );
+
+          return canonicalVideo;
+        }
+      }
+
+      console.log(
+        "[NEXCHAT LINK RESOLVER] TIKTOK MEDIA UNAVAILABLE - LINK FALLBACK",
+      );
+
+      return resolved;
+    } catch (error) {
+      console.log(
+        "[NEXCHAT LINK RESOLVER] TIKTOK ERROR",
+        String(error),
+      );
+
+      return resolved;
+    }
   }
 
   try {

@@ -8,8 +8,119 @@ const HOST = process.env.HOST || "0.0.0.0";
 
 const DATA_DIR = path.join(__dirname, "data");
 const QUEUE_FILE = path.join(DATA_DIR, "offline-queue.json");
+const DIRECTORY_FILE = path.join(DATA_DIR, "users.json");
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
+
+function loadDirectory() {
+  try {
+    if (!fs.existsSync(DIRECTORY_FILE)) {
+      return {};
+    }
+
+    const raw = fs.readFileSync(DIRECTORY_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (error) {
+    console.error("[relay] Failed to load user directory:", error);
+    return {};
+  }
+}
+
+let userDirectory = loadDirectory();
+
+function saveDirectory() {
+  const tempFile = `${DIRECTORY_FILE}.tmp`;
+
+  fs.writeFileSync(
+    tempFile,
+    JSON.stringify(userDirectory, null, 2),
+    "utf8",
+  );
+
+  fs.renameSync(tempFile, DIRECTORY_FILE);
+}
+
+function normalizeDirectoryUser(user) {
+  if (!user || typeof user !== "object") {
+    return null;
+  }
+
+  if (
+    typeof user.id !== "string" ||
+    !user.id.trim() ||
+    typeof user.username !== "string" ||
+    !user.username.trim() ||
+    typeof user.displayName !== "string" ||
+    !user.displayName.trim() ||
+    typeof user.publicKey !== "string" ||
+    !user.publicKey.trim()
+  ) {
+    return null;
+  }
+
+  return {
+    id: user.id.trim(),
+    username: user.username.trim(),
+    displayName: user.displayName.trim(),
+    publicKey: user.publicKey.trim(),
+    avatarUri:
+      typeof user.avatarUri === "string"
+        ? user.avatarUri.trim()
+        : "",
+    bio:
+      typeof user.bio === "string"
+        ? user.bio.trim()
+        : "",
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function upsertDirectoryUser(user) {
+  const normalized = normalizeDirectoryUser(user);
+
+  if (!normalized) {
+    return null;
+  }
+
+  userDirectory[normalized.id] = normalized;
+  saveDirectory();
+
+  return normalized;
+}
+
+function searchDirectory(query, requesterId) {
+  const normalizedQuery =
+    String(query || "").trim().toLowerCase();
+
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  return Object.values(userDirectory)
+    .filter((user) => user.id !== requesterId)
+    .filter((user) => {
+      const id = user.id.toLowerCase();
+      const username = user.username.toLowerCase();
+      const displayName = user.displayName.toLowerCase();
+
+      return (
+        id.includes(normalizedQuery) ||
+        username.includes(normalizedQuery) ||
+        displayName.includes(normalizedQuery)
+      );
+    })
+    .slice(0, 25);
+}
+
+function getDirectoryUser(identityId, requesterId) {
+  if (!identityId || identityId === requesterId) {
+    return null;
+  }
+
+  return userDirectory[identityId] || null;
+}
 
 function loadQueue() {
   try {
@@ -179,23 +290,91 @@ function removePeer(identityId, socket) {
   return true;
 }
 
+function normalizeEnvelopePayload(envelope) {
+  if (!envelope || typeof envelope !== "object") {
+    return envelope;
+  }
+
+  const payload = envelope.payload;
+
+  /*
+   * JSON serialization of a Uint8Array can produce an object
+   * whose keys are numeric byte offsets. Older durable queue
+   * entries may therefore contain:
+   *
+   *   { "0": 123, "1": 34, ... }
+   *
+   * Current clients use Base64 strings across the WebSocket
+   * boundary. Normalize both representations to Base64 so
+   * offline replay is compatible with the current client.
+   */
+  if (
+    payload &&
+    typeof payload === "object" &&
+    !Array.isArray(payload)
+  ) {
+    const keys = Object.keys(payload);
+
+    if (
+      keys.length > 0 &&
+      keys.every((key) => /^\d+$/.test(key))
+    ) {
+      const bytes = Buffer.from(
+        keys
+          .sort((a, b) => Number(a) - Number(b))
+          .map((key) => Number(payload[key]) & 0xff),
+      );
+
+      return {
+        ...envelope,
+        payload: bytes.toString("base64"),
+      };
+    }
+  }
+
+  if (Buffer.isBuffer(payload)) {
+    return {
+      ...envelope,
+      payload: payload.toString("base64"),
+    };
+  }
+
+  if (payload instanceof Uint8Array) {
+    return {
+      ...envelope,
+      payload: Buffer.from(payload).toString("base64"),
+    };
+  }
+
+  return envelope;
+}
+
 function queueEnvelope(envelope) {
-  const recipientId = envelope.recipientId;
+  const normalizedEnvelope =
+    normalizeEnvelopePayload(envelope);
+
+  const recipientId =
+    normalizedEnvelope.recipientId;
 
   if (!offlineQueue[recipientId]) {
     offlineQueue[recipientId] = [];
   }
 
-  const key = envelopeKey(envelope);
+  const key = envelopeKey(normalizedEnvelope);
 
-  const duplicate = offlineQueue[recipientId].some(
-    (item) => envelopeKey(item) === key,
-  );
+  const duplicate =
+    offlineQueue[recipientId].some(
+      (item) => envelopeKey(item) === key,
+    );
 
   if (!duplicate) {
-    offlineQueue[recipientId].push(envelope);
+    offlineQueue[recipientId].push(
+      normalizedEnvelope,
+    );
     saveQueue();
   }
+
+  return normalizedEnvelope;
 }
 
 function deliverOfflineQueue(identityId, socket) {
@@ -217,20 +396,23 @@ function deliverOfflineQueue(identityId, socket) {
       continue;
     }
 
+    const normalizedEnvelope =
+      normalizeEnvelopePayload(envelope);
+
     const sent = sendJson(socket, {
       type: "envelope",
-      envelope,
+      envelope: normalizedEnvelope,
       offline: true,
     });
 
     if (!sent) {
-      pending.push(envelope);
+      pending.push(normalizedEnvelope);
     } else {
-      // Keep the envelope persisted until the recipient explicitly
-      // acknowledges delivery. This prevents message loss if the
-      // recipient disconnects after receiving the envelope but before
-      // sending delivery-ack.
-      pending.push(envelope);
+      // Keep the normalized envelope persisted until the recipient
+      // explicitly acknowledges delivery. This prevents message loss
+      // if the recipient disconnects after receiving the envelope but
+      // before sending delivery-ack.
+      pending.push(normalizedEnvelope);
     }
   }
 
@@ -272,10 +454,11 @@ function forwardEnvelope(senderId, envelope) {
    * durable queue. The envelope is removed only after the
    * recipient sends an authenticated delivery acknowledgement.
    */
-  queueEnvelope(envelope);
+  const normalizedEnvelope =
+    queueEnvelope(envelope);
 
   const recipientSocket = peers.get(
-    envelope.recipientId,
+    normalizedEnvelope.recipientId,
   );
 
   if (recipientSocket) {
@@ -283,11 +466,19 @@ function forwardEnvelope(senderId, envelope) {
       recipientSocket,
       {
         type: "envelope",
-        envelope,
+        envelope: normalizedEnvelope,
       },
     );
 
     if (forwarded) {
+      pendingDeliveries.set(
+        deliveryKey(
+          normalizedEnvelope.messageId,
+          normalizedEnvelope.recipientId,
+        ),
+        normalizedEnvelope,
+      );
+
       return {
         accepted: true,
         forwarded: true,
@@ -314,6 +505,9 @@ const httpServer = http.createServer((req, res) => {
         ok: true,
         service: "nexchat-relay",
         peers: peers.size,
+        directoryUsers: Object.keys(
+          userDirectory,
+        ).length,
         queuedRecipients: Object.keys(
           offlineQueue,
         ).length,
@@ -392,6 +586,71 @@ wss.on("connection", (socket) => {
       return;
     }
 
+    if (
+      message.type === "directory-register"
+    ) {
+
+      const user = message.user;
+
+      if (!user || user.id !== identityId) {
+        sendJson(socket, {
+          type: "directory-register-ack",
+          accepted: false,
+          error:
+            "Directory identity does not match registered identity.",
+        });
+
+        return;
+      }
+
+      const saved = upsertDirectoryUser(user);
+
+      sendJson(socket, {
+        type: "directory-register-ack",
+        accepted: Boolean(saved),
+        user: saved || undefined,
+        error: saved
+          ? undefined
+          : "Invalid public user profile.",
+      });
+
+      return;
+    }
+
+    if (
+      message.type === "directory-search"
+    ) {
+      const results = searchDirectory(
+        message.query,
+        identityId,
+      );
+
+      sendJson(socket, {
+        type: "directory-search-result",
+        requestId: message.requestId,
+        results,
+      });
+
+      return;
+    }
+
+    if (
+      message.type === "directory-profile"
+    ) {
+      const user = getDirectoryUser(
+        message.identityId,
+        identityId,
+      );
+
+      sendJson(socket, {
+        type: "directory-profile-result",
+        requestId: message.requestId,
+        user: user || undefined,
+      });
+
+      return;
+    }
+
     if (!identityId) {
       sendJson(socket, {
         type: "error",
@@ -460,8 +719,9 @@ wss.on("connection", (socket) => {
 
       sendJson(socket, {
         type: "event-ack",
-        accepted: true,
-        forwarded,
+        eventId: event.id,
+        accepted: Boolean(forwarded),
+        forwarded: Boolean(forwarded),
       });
 
       return;

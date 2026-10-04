@@ -14,6 +14,7 @@ import {
 
 import {
   acceptPeerPacket,
+  getPeerCustodyItems,
   getReadyPeerCustodyItems,
   hasPeerCustody,
   markPeerSending,
@@ -70,6 +71,14 @@ export class NearbyPeerBridge {
 
   private receiverInstalled = new Set<string>();
 
+  private flushTimer:
+    ReturnType<typeof setInterval> | null = null;
+
+  private flushRunning = false;
+
+  private readonly flushIntervalMs =
+    10_000;
+
   constructor(
     adapters: NearbyBridgeAdapter[],
     handlers: NearbyBridgeHandlers,
@@ -99,6 +108,80 @@ export class NearbyPeerBridge {
     );
 
     this.receiverInstalled.add(adapter.kind);
+  }
+
+  /**
+   * Seed the nearby custody store with an outbound envelope.
+   *
+   * The encrypted TransportEnvelope remains unchanged. The bridge
+   * only wraps it in the application-layer peer packet; it never
+   * decrypts or alters the payload.
+   */
+  enqueueEnvelope(
+    envelope: import("./protocol").TransportEnvelope,
+  ): void {
+    const packet =
+      createPeerMessagePacket(envelope);
+
+    if (!canForwardPeerPacket(packet)) {
+      return;
+    }
+
+    acceptPeerPacket(packet);
+  }
+
+  /**
+   * Attempt nearby forwarding immediately.
+   *
+   * The peer custody store remains durable if no adapter is
+   * currently available, so a later flush can retry it.
+   */
+  async flushOutbound(): Promise<void> {
+    if (this.flushRunning) {
+      return;
+    }
+
+    this.flushRunning = true;
+
+    try {
+      await this.flush();
+    } finally {
+      this.flushRunning = false;
+    }
+  }
+
+  /**
+   * Start periodic nearby custody delivery.
+   *
+   * This is intentionally lightweight. When the native adapters
+   * report unavailable, discovery returns immediately and the
+   * durable custody item remains stored for the next attempt.
+   */
+  start(): void {
+    if (this.flushTimer) {
+      return;
+    }
+
+    this.flushTimer =
+      setInterval(() => {
+        void this.flushOutbound();
+      }, this.flushIntervalMs);
+
+    void this.flushOutbound();
+  }
+
+  /**
+   * Stop periodic nearby delivery.
+   *
+   * The durable peer custody store is deliberately not cleared.
+   */
+  stop(): void {
+    if (!this.flushTimer) {
+      return;
+    }
+
+    clearInterval(this.flushTimer);
+    this.flushTimer = null;
   }
 
   async discover(): Promise<NearbyPeer[]> {
@@ -382,12 +465,19 @@ export class NearbyPeerBridge {
   ): Promise<void> {
     if (!packet.accepted) return;
 
+    /*
+     * Custody ACKs settle the packet that we may
+     * currently have marked as "sending". Do not
+     * search only ready/queued custody items here.
+     */
+    const custodyItems =
+      getPeerCustodyItems();
+
     const custody =
-      getReadyPeerCustodyItems()
-        .find(item =>
-          item.packet.packetId ===
-          packet.packetId,
-        );
+      custodyItems.find(item =>
+        item.packet.packetId ===
+        packet.packetId,
+      );
 
     if (!custody) return;
 
@@ -415,13 +505,42 @@ export class NearbyPeerBridge {
 
     if (!identityId) return;
 
+    const returnPath =
+      Array.isArray(packet.returnPath)
+        ? packet.returnPath
+        : [];
+
+    if (returnPath.length === 0) {
+      return;
+    }
+
+    const currentIndex =
+      returnPath.indexOf(identityId);
+
     /*
-     * The delivery ACK is addressed to the
-     * original sender. Only that device settles
-     * the outbound message.
+     * The ACK must arrive from the previous hop
+     * in the recorded reverse path. This prevents
+     * an unrelated nearby peer from injecting a
+     * delivery confirmation.
+     */
+    if (currentIndex < 0) {
+      return;
+    }
+
+    if (
+      currentIndex > 0 &&
+      returnPath[currentIndex - 1] !== peerId
+    ) {
+      return;
+    }
+
+    /*
+     * The final entry is the original sender.
+     * Only that device settles the outbound message.
      */
     if (
-      packet.recipientId === identityId
+      currentIndex ===
+      returnPath.length - 1
     ) {
       await this.handlers.onDeliveryAck?.(
         packet,
@@ -430,18 +549,50 @@ export class NearbyPeerBridge {
     }
 
     /*
-     * An intermediate peer forwards the ACK
-     * backwards through the recorded route.
+     * Intermediate peers forward the ACK to the
+     * next device in the recorded return path.
+     *
+     * The encrypted message payload is not present
+     * in a delivery ACK, so no message decryption
+     * occurs here.
      */
-    const path =
-      packet.routeId &&
-      packet.routeId.length > 0
-        ? undefined
-        : undefined;
+    const nextPeerId =
+      returnPath[currentIndex + 1];
 
-    void path;
-    void adapter;
-    void peerId;
+    if (
+      !nextPeerId ||
+      nextPeerId === identityId
+    ) {
+      return;
+    }
+
+    try {
+      /*
+       * The return hop may use a different nearby transport
+       * from the one that delivered this ACK. Resolve the
+       * adapter for the actual next peer instead of blindly
+       * reusing the incoming adapter.
+       */
+      const nextAdapter =
+        await this.findAdapterForPeer(
+          nextPeerId,
+        );
+
+      if (!nextAdapter) {
+        return;
+      }
+
+      await this.sendPacket(
+        nextAdapter,
+        nextPeerId,
+        packet,
+      );
+    } catch {
+      /*
+       * Do not settle the original message if the
+       * return hop could not be completed.
+       */
+    }
   }
 
   private async sendPacket(

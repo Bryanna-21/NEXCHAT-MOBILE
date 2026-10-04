@@ -4,11 +4,18 @@ export type FeedPostType = "text" | "media" | "file" | "link";
 
 export type FeedPostAudience =
   | "everyone"
-  | "my_university"
   | "connections"
   | "only_me";
 
-export type FeedMediaKind = "image" | "video" | "audio" | "file";
+export type FeedPostReaction =
+  | "like"
+  | "love"
+  | "laugh"
+  | "wow"
+  | "sad"
+  | "angry";
+
+export type FeedMediaKind = "image" | "video" | "file" | "tiktok";
 
 export type FeedCreator = {
   id: string;
@@ -28,10 +35,12 @@ export type FeedAttachment = {
   mimeType?: string;
   size?: number;
   kind?: FeedMediaKind;
-  durationMs?: number;
   overlayText?: string;
   overlayX?: number;
   overlayY?: number;
+  provider?: string;
+  videoId?: string;
+
 };
 
 export type FeedComment = {
@@ -64,6 +73,10 @@ export type FeedPost = {
   creator: FeedCreator;
   text: string;
   linkUrl?: string;
+  linkTitle?: string;
+  linkDescription?: string;
+  linkImageUri?: string;
+  linkProvider?: string;
 
   /**
    * Primary attachment kept for backward compatibility.
@@ -76,21 +89,40 @@ export type FeedPost = {
   attachments?: FeedAttachment[];
 
   /**
-   * Optional music/audio attached to the post.
-   * This is played as an audio attachment; it is not falsely
-   * treated as permanently mixed into a video.
-   */
-  music?: FeedAttachment;
-
-  /**
    * IDs of users who currently like this post.
    */
   likedBy?: string[];
 
   /**
+   * Counts for non-like post reactions.
+   */
+  reactions?: Record<string, number>;
+
+  /**
+   * Whether other users may download this post's content.
+   * Defaults to true for backward compatibility.
+   */
+  allowDownloads?: boolean;
+
+  /**
+   * Number of feed views.
+   */
+  viewCount?: number;
+
+  /**
    * Number of successful native share actions.
    */
   shareCount?: number;
+
+  /**
+   * Whether other users may reshare this post.
+   */
+  allowReshare?: boolean;
+
+  /**
+   * IDs of users who have reshared this post.
+   */
+  resharedBy?: string[];
 
   /**
    * Cached comment count. The actual comments are stored separately.
@@ -132,10 +164,7 @@ function normalizeAttachment(
         ? "image"
         : attachment.mimeType?.startsWith("video/")
           ? "video"
-          : attachment.mimeType?.startsWith("audio/")
-            ? "audio"
-            : "file"),
-    durationMs: attachment.durationMs,
+          : "file"),
     overlayText: attachment.overlayText?.trim() || undefined,
     overlayX:
       typeof attachment.overlayX === "number"
@@ -145,6 +174,8 @@ function normalizeAttachment(
       typeof attachment.overlayY === "number"
         ? Math.max(0.08, Math.min(0.92, attachment.overlayY))
         : undefined,
+    provider: attachment.provider,
+    videoId: attachment.videoId,
   };
 }
 
@@ -165,10 +196,53 @@ function normalizePost(raw: FeedPost): FeedPost {
     attachment: primary,
     attachments,
     likedBy: Array.isArray(raw.likedBy) ? raw.likedBy : [],
+    reactions: (() => {
+      const normalized =
+        raw.reactions &&
+        typeof raw.reactions === "object" &&
+        !Array.isArray(raw.reactions)
+          ? Object.fromEntries(
+              Object.entries(raw.reactions).filter(
+                ([emoji, count]) =>
+                  typeof emoji === "string" &&
+                  typeof count === "number" &&
+                  count > 0,
+              ),
+            )
+          : {};
+
+      const legacyLikeCount = Array.isArray(raw.likedBy)
+        ? raw.likedBy.filter(
+            (value): value is string =>
+              typeof value === "string" && value.trim().length > 0,
+          ).length
+        : 0;
+
+      if (
+        legacyLikeCount > 0 &&
+        (!normalized.like ||
+          typeof normalized.like !== "number" ||
+          normalized.like < legacyLikeCount)
+      ) {
+        return {
+          ...normalized,
+          like: legacyLikeCount,
+        };
+      }
+
+      return normalized;
+    })(),
+    allowDownloads: raw.allowDownloads !== false,
+    viewCount:
+      typeof raw.viewCount === "number" && raw.viewCount >= 0
+        ? raw.viewCount
+        : 0,
     shareCount:
       typeof raw.shareCount === "number" && raw.shareCount >= 0
         ? raw.shareCount
         : 0,
+    allowReshare: raw.allowReshare !== false,
+    resharedBy: Array.isArray(raw.resharedBy) ? raw.resharedBy : [],
     commentCount:
       typeof raw.commentCount === "number" && raw.commentCount >= 0
         ? raw.commentCount
@@ -228,6 +302,82 @@ async function saveFeedPosts(posts: FeedPost[]): Promise<void> {
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(posts));
 }
 
+export async function incrementFeedPostView(
+  postId: string,
+): Promise<FeedPost | null> {
+  const posts = await loadFeedPosts();
+  const index = posts.findIndex((post) => post.id === postId);
+
+  if (index < 0) return null;
+
+  const updatedPost: FeedPost = {
+    ...posts[index],
+    viewCount: (posts[index].viewCount ?? 0) + 1,
+    updatedAt: new Date().toISOString(),
+  };
+
+  posts[index] = updatedPost;
+  await saveFeedPosts(posts);
+
+  return updatedPost;
+}
+
+export async function setFeedPostReshareAllowed(
+  postId: string,
+  allowed: boolean,
+): Promise<FeedPost | null> {
+  const posts = await loadFeedPosts();
+  const index = posts.findIndex((post) => post.id === postId);
+
+  if (index < 0) return null;
+
+  const updatedPost: FeedPost = {
+    ...posts[index],
+    allowReshare: allowed,
+    updatedAt: new Date().toISOString(),
+  };
+
+  posts[index] = updatedPost;
+  await saveFeedPosts(posts);
+
+  return updatedPost;
+}
+
+export async function toggleFeedPostReshare(
+  postId: string,
+  userId: string,
+): Promise<FeedPost | null> {
+  const posts = await loadFeedPosts();
+  const index = posts.findIndex((post) => post.id === postId);
+
+  if (index < 0) return null;
+
+  const post = posts[index];
+
+  if (post.allowReshare === false) {
+    return post;
+  }
+
+  const resharedBy = new Set(post.resharedBy ?? []);
+
+  if (resharedBy.has(userId)) {
+    resharedBy.delete(userId);
+  } else {
+    resharedBy.add(userId);
+  }
+
+  const updatedPost: FeedPost = {
+    ...post,
+    resharedBy: Array.from(resharedBy),
+    updatedAt: new Date().toISOString(),
+  };
+
+  posts[index] = updatedPost;
+  await saveFeedPosts(posts);
+
+  return updatedPost;
+}
+
 async function loadComments(): Promise<FeedComment[]> {
   try {
     const raw = await AsyncStorage.getItem(COMMENTS_STORAGE_KEY);
@@ -280,9 +430,12 @@ export async function createFeedPost(input: {
   creator: FeedCreator;
   text?: string;
   linkUrl?: string;
+  linkTitle?: string;
+  linkDescription?: string;
+  linkImageUri?: string;
+  linkProvider?: string;
   attachment?: FeedAttachment;
   attachments?: FeedAttachment[];
-  music?: FeedAttachment;
 }): Promise<FeedPost> {
   const existing = await loadFeedPosts();
 
@@ -301,17 +454,41 @@ export async function createFeedPost(input: {
       ]
     : additionalAttachments;
 
+  const hasMedia =
+    allAttachments.length > 0 &&
+    (input.type === "media" || input.type === "file");
+
   const post: FeedPost = {
     id: createId("feed"),
     type: input.type,
     creator: input.creator,
     text: input.text?.trim() ?? "",
-    linkUrl: input.linkUrl?.trim() || undefined,
+    linkUrl:
+      hasMedia
+        ? undefined
+        : input.linkUrl?.trim() || undefined,
+    linkTitle:
+      hasMedia
+        ? undefined
+        : input.linkTitle?.trim() || undefined,
+    linkDescription:
+      hasMedia
+        ? undefined
+        : input.linkDescription?.trim() || undefined,
+    linkImageUri:
+      hasMedia
+        ? undefined
+        : input.linkImageUri?.trim() || undefined,
+    linkProvider:
+      hasMedia
+        ? undefined
+        : input.linkProvider?.trim() || undefined,
     attachment: allAttachments[0],
     attachments: allAttachments,
-    music: normalizeAttachment(input.music),
     audience: "everyone",
     likedBy: [],
+    reactions: {},
+    allowDownloads: true,
     shareCount: 0,
     commentCount: 0,
     createdAt: new Date().toISOString(),
@@ -328,9 +505,12 @@ export async function updateFeedPost(
     type?: FeedPostType;
     text?: string;
     linkUrl?: string;
+    linkTitle?: string;
+    linkDescription?: string;
+    linkImageUri?: string;
+    linkProvider?: string;
     attachment?: FeedAttachment;
     attachments?: FeedAttachment[];
-    music?: FeedAttachment;
   },
 ): Promise<FeedPost | null> {
   const existing = await loadFeedPosts();
@@ -352,23 +532,51 @@ export async function updateFeedPost(
           .filter(Boolean) as FeedAttachment[]
       : current.attachments ?? (nextPrimary ? [nextPrimary] : []);
 
+  const nextType = patch.type ?? current.type;
+
+  const hasMedia =
+    nextAttachments.length > 0 &&
+    (nextType === "media" || nextType === "file");
+
   const nextPost: FeedPost = {
     ...current,
-    type: patch.type ?? current.type,
+    type: nextType,
     text:
       patch.text !== undefined
         ? patch.text.trim()
         : current.text,
     linkUrl:
-      patch.linkUrl !== undefined
-        ? patch.linkUrl.trim() || undefined
-        : current.linkUrl,
+      hasMedia
+        ? undefined
+        : patch.linkUrl !== undefined
+          ? patch.linkUrl.trim() || undefined
+          : current.linkUrl,
+    linkTitle:
+      hasMedia
+        ? undefined
+        : patch.linkTitle !== undefined
+          ? patch.linkTitle.trim() || undefined
+          : current.linkTitle,
+    linkDescription:
+      hasMedia
+        ? undefined
+        : patch.linkDescription !== undefined
+          ? patch.linkDescription.trim() || undefined
+          : current.linkDescription,
+    linkImageUri:
+      hasMedia
+        ? undefined
+        : patch.linkImageUri !== undefined
+          ? patch.linkImageUri.trim() || undefined
+          : current.linkImageUri,
+    linkProvider:
+      hasMedia
+        ? undefined
+        : patch.linkProvider !== undefined
+          ? patch.linkProvider.trim() || undefined
+          : current.linkProvider,
     attachment: nextPrimary,
     attachments: nextAttachments,
-    music:
-      patch.music !== undefined
-        ? normalizeAttachment(patch.music)
-        : current.music,
     updatedAt: new Date().toISOString(),
   };
 
@@ -448,6 +656,29 @@ export async function toggleFeedPostNotifications(
   const updatedPost: FeedPost = {
     ...posts[index],
     notificationsEnabled: !posts[index].notificationsEnabled,
+  };
+
+  const updated = [...posts];
+  updated[index] = updatedPost;
+
+  await saveFeedPosts(updated);
+
+  return updatedPost;
+}
+
+export async function toggleFeedPostDownloads(
+  postId: string,
+): Promise<FeedPost | null> {
+  const posts = await loadFeedPosts();
+  const index = posts.findIndex((post) => post.id === postId);
+
+  if (index === -1) return null;
+
+  const updatedPost: FeedPost = {
+    ...posts[index],
+    allowDownloads:
+      posts[index].allowDownloads === false ? true : false,
+    updatedAt: new Date().toISOString(),
   };
 
   const updated = [...posts];
@@ -631,6 +862,216 @@ export async function toggleFeedCommentLike(
   await saveComments(updated);
 
   return updatedComment;
+}
+
+const POST_REACTIONS_STORAGE_KEY =
+  "@nexchat/feed/post-reactions/v1";
+
+const FEED_HIDDEN_POSTS_STORAGE_KEY =
+  "@nexchat/feed/hidden-posts/v1";
+
+export async function getFeedPostReaction(
+  postId: string,
+  userId: string,
+): Promise<FeedPostReaction | undefined> {
+  if (!postId || !userId) return undefined;
+
+  try {
+    const raw = await AsyncStorage.getItem(
+      POST_REACTIONS_STORAGE_KEY,
+    );
+
+    if (!raw) return undefined;
+
+    const parsed = JSON.parse(raw);
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return undefined;
+    }
+
+    const value = (parsed as Record<string, unknown>)[
+      `${userId}:${postId}`
+    ];
+
+    if (
+      value === "like" ||
+      value === "love" ||
+      value === "laugh" ||
+      value === "wow" ||
+      value === "sad" ||
+      value === "angry"
+    ) {
+      return value;
+    }
+
+    const posts = await loadFeedPosts();
+    const post = posts.find((item) => item.id === postId);
+
+    if (post?.likedBy?.includes(userId)) {
+      return "like";
+    }
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function toggleFeedPostReaction(
+  postId: string,
+  userId: string,
+  reaction: FeedPostReaction,
+): Promise<FeedPost | null> {
+  if (!postId || !userId || !reaction) return null;
+
+  const posts = await loadFeedPosts();
+  const index = posts.findIndex((post) => post.id === postId);
+
+  if (index === -1) return null;
+
+  let userReactions: Record<string, string> = {};
+
+  try {
+    const raw = await AsyncStorage.getItem(
+      POST_REACTIONS_STORAGE_KEY,
+    );
+
+    if (raw) {
+      const parsed = JSON.parse(raw);
+
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed)
+      ) {
+        userReactions = parsed as Record<string, string>;
+      }
+    }
+  } catch {
+    userReactions = {};
+  }
+
+  const userReactionKey = `${userId}:${postId}`;
+  const storedReaction = userReactions[userReactionKey];
+
+  const legacyLiked =
+    posts[index].likedBy?.includes(userId) ?? false;
+
+  const existingReaction =
+    storedReaction ??
+    (legacyLiked ? "like" : undefined);
+
+  const nextCounts = {
+    ...(posts[index].reactions ?? {}),
+  };
+
+  const nextLikedBy = [...(posts[index].likedBy ?? [])];
+  const likedByIndex = nextLikedBy.indexOf(userId);
+
+  if (existingReaction === reaction) {
+    delete userReactions[userReactionKey];
+
+    nextCounts[reaction] = Math.max(
+      0,
+      (nextCounts[reaction] ?? 0) - 1,
+    );
+
+    if (likedByIndex >= 0) {
+      nextLikedBy.splice(likedByIndex, 1);
+    }
+  } else {
+    if (existingReaction) {
+      nextCounts[existingReaction] = Math.max(
+        0,
+        (nextCounts[existingReaction] ?? 0) - 1,
+      );
+    }
+
+    nextCounts[reaction] =
+      (nextCounts[reaction] ?? 0) + 1;
+
+    userReactions[userReactionKey] = reaction;
+
+    if (reaction === "like") {
+      if (likedByIndex < 0) {
+        nextLikedBy.push(userId);
+      }
+    } else if (likedByIndex >= 0) {
+      nextLikedBy.splice(likedByIndex, 1);
+    }
+  }
+
+  await AsyncStorage.setItem(
+    POST_REACTIONS_STORAGE_KEY,
+    JSON.stringify(userReactions),
+  );
+
+  const updatedPost: FeedPost = {
+    ...posts[index],
+    likedBy: nextLikedBy,
+    reactions: Object.fromEntries(
+      Object.entries(nextCounts).filter(
+        ([, count]) =>
+          typeof count === "number" && count > 0,
+      ),
+    ),
+  };
+
+  const updated = [...posts];
+  updated[index] = updatedPost;
+
+  await saveFeedPosts(updated);
+
+  return updatedPost;
+}
+
+export async function loadHiddenFeedPostIds(): Promise<string[]> {
+  try {
+    const raw = await AsyncStorage.getItem(
+      FEED_HIDDEN_POSTS_STORAGE_KEY,
+    );
+
+    if (!raw) return [];
+
+    const parsed = JSON.parse(raw);
+
+    if (!Array.isArray(parsed)) return [];
+
+    return Array.from(
+      new Set(
+        parsed.filter(
+          (value): value is string =>
+            typeof value === "string" && value.trim().length > 0,
+        ),
+      ),
+    );
+  } catch {
+    return [];
+  }
+}
+
+export async function setFeedPostHidden(
+  postId: string,
+  hidden: boolean,
+): Promise<string[]> {
+  const current = await loadHiddenFeedPostIds();
+
+  const next = new Set(current);
+
+  if (hidden) {
+    next.add(postId);
+  } else {
+    next.delete(postId);
+  }
+
+  const result = Array.from(next);
+
+  await AsyncStorage.setItem(
+    FEED_HIDDEN_POSTS_STORAGE_KEY,
+    JSON.stringify(result),
+  );
+
+  return result;
 }
 
 export async function getFeedCommentReaction(

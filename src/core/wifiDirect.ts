@@ -29,6 +29,7 @@ export interface WiFiDirectTransport {
 export class NativeWiFiDirectTransport
   implements WiFiDirectTransport
 {
+  readonly kind = "nearby-wifi" as const;
   async isAvailable(): Promise<boolean> {
     return false;
   }

@@ -29,14 +29,10 @@ import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import * as MediaLibrary from "expo-media-library";
 import * as Clipboard from "expo-clipboard";
-import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { WebView } from "react-native-webview";
 const Pdf = null;
 import {
-  downloadDirectLink,
-  resolveLink,
-  resolveLinkMetadata,
 } from "../core/linkResolver";
 import { ingestAttachment } from "../core/attachmentIngestion";
 import { canUserSeeFeedPost } from "../core/feedAudience";
@@ -56,10 +52,16 @@ import {
   FeedCreator,
   FeedPost,
   FeedPostAudience,
+  FeedPostReaction,
   FeedPostType,
   loadFeedPosts,
   setFeedPostAudience,
   toggleFeedLike,
+  getFeedPostReaction,
+  toggleFeedPostReaction,
+  toggleFeedPostDownloads,
+  loadHiddenFeedPostIds,
+  setFeedPostHidden,
   getFeedComments,
   addFeedComment,
   FeedComment,
@@ -162,6 +164,234 @@ function formatDate(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+const FEED_REACTIONS: Array<{
+  key: FeedPostReaction;
+  emoji: string;
+  label: string;
+}> = [
+  { key: "like", emoji: "👍", label: "Like" },
+  { key: "love", emoji: "❤️", label: "Love" },
+  { key: "laugh", emoji: "😂", label: "Laugh" },
+  { key: "wow", emoji: "😮", label: "Wow" },
+  { key: "sad", emoji: "😢", label: "Sad" },
+  { key: "angry", emoji: "😡", label: "Angry" },
+];
+
+function AnimatedReactionEmoji({
+  reaction,
+  playKey,
+}: {
+  reaction: FeedPostReaction;
+  playKey: number;
+}) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const translateX = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(0)).current;
+  const rotate = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (playKey === 0) return;
+
+    scale.setValue(1);
+    translateX.setValue(0);
+    translateY.setValue(0);
+    rotate.setValue(0);
+
+    let animation: Animated.CompositeAnimation;
+
+    switch (reaction) {
+      case "like":
+        animation = Animated.sequence([
+          Animated.parallel([
+            Animated.timing(scale, {
+              toValue: 1.28,
+              duration: 110,
+              useNativeDriver: true,
+            }),
+            Animated.timing(translateY, {
+              toValue: -6,
+              duration: 110,
+              useNativeDriver: true,
+            }),
+          ]),
+          Animated.spring(scale, {
+            toValue: 1,
+            friction: 5,
+            tension: 120,
+            useNativeDriver: true,
+          }),
+          Animated.timing(translateY, {
+            toValue: 0,
+            duration: 90,
+            useNativeDriver: true,
+          }),
+        ]);
+        break;
+
+      case "love":
+        animation = Animated.sequence([
+          Animated.timing(scale, {
+            toValue: 1.3,
+            duration: 130,
+            useNativeDriver: true,
+          }),
+          Animated.timing(scale, {
+            toValue: 0.94,
+            duration: 100,
+            useNativeDriver: true,
+          }),
+          Animated.timing(scale, {
+            toValue: 1.22,
+            duration: 110,
+            useNativeDriver: true,
+          }),
+          Animated.spring(scale, {
+            toValue: 1,
+            friction: 5,
+            tension: 120,
+            useNativeDriver: true,
+          }),
+        ]);
+        break;
+
+      case "laugh":
+        animation = Animated.sequence([
+          Animated.timing(rotate, {
+            toValue: -1,
+            duration: 70,
+            useNativeDriver: true,
+          }),
+          Animated.timing(rotate, {
+            toValue: 1,
+            duration: 70,
+            useNativeDriver: true,
+          }),
+          Animated.timing(rotate, {
+            toValue: -0.8,
+            duration: 65,
+            useNativeDriver: true,
+          }),
+          Animated.timing(rotate, {
+            toValue: 0.8,
+            duration: 65,
+            useNativeDriver: true,
+          }),
+          Animated.spring(rotate, {
+            toValue: 0,
+            friction: 5,
+            tension: 100,
+            useNativeDriver: true,
+          }),
+        ]);
+        break;
+
+      case "wow":
+        animation = Animated.sequence([
+          Animated.timing(scale, {
+            toValue: 1.42,
+            duration: 120,
+            useNativeDriver: true,
+          }),
+          Animated.timing(scale, {
+            toValue: 0.9,
+            duration: 100,
+            useNativeDriver: true,
+          }),
+          Animated.spring(scale, {
+            toValue: 1,
+            friction: 5,
+            tension: 110,
+            useNativeDriver: true,
+          }),
+        ]);
+        break;
+
+      case "sad":
+        animation = Animated.sequence([
+          Animated.timing(translateY, {
+            toValue: 9,
+            duration: 180,
+            useNativeDriver: true,
+          }),
+          Animated.timing(translateY, {
+            toValue: 3,
+            duration: 100,
+            useNativeDriver: true,
+          }),
+          Animated.spring(translateY, {
+            toValue: 0,
+            friction: 6,
+            tension: 90,
+            useNativeDriver: true,
+          }),
+        ]);
+        break;
+
+      case "angry":
+        animation = Animated.sequence([
+          Animated.timing(translateX, {
+            toValue: -7,
+            duration: 55,
+            useNativeDriver: true,
+          }),
+          Animated.timing(translateX, {
+            toValue: 7,
+            duration: 55,
+            useNativeDriver: true,
+          }),
+          Animated.timing(translateX, {
+            toValue: -6,
+            duration: 50,
+            useNativeDriver: true,
+          }),
+          Animated.timing(translateX, {
+            toValue: 6,
+            duration: 50,
+            useNativeDriver: true,
+          }),
+          Animated.spring(translateX, {
+            toValue: 0,
+            friction: 5,
+            tension: 100,
+            useNativeDriver: true,
+          }),
+        ]);
+        break;
+    }
+
+    animation.start();
+  }, [
+    playKey,
+    reaction,
+    rotate,
+    scale,
+    translateX,
+    translateY,
+  ]);
+
+  const rotation = rotate.interpolate({
+    inputRange: [-1, 1],
+    outputRange: ["-12deg", "12deg"],
+  });
+
+  return (
+    <Animated.View
+      style={{
+        transform: [
+          { scale },
+          { translateX },
+          { translateY },
+          { rotate: rotation },
+        ],
+      }}
+    >
+      <Text style={styles.reactionEmoji}>{FEED_REACTIONS.find(
+        (item) => item.key === reaction,
+      )?.emoji}</Text>
+    </Animated.View>
+  );
 }
 
 let activeFeedVideoPlayer: ReturnType<typeof useVideoPlayer> | null = null;
@@ -273,7 +503,7 @@ function FeedMediaCarousel({
           >
             {isActive &&
               page !== index &&
-              (item.kind === "video" || item.kind === "tiktok") ? (
+              (item.kind === "video") ? (
               <View style={[styles.feedVideo, { backgroundColor: theme.bg }]} />
             ) : (
               <FeedMedia
@@ -390,16 +620,6 @@ export function FeedMedia({
     );
   }
 
-  if (kind === "tiktok") {
-    return (
-      <FeedTikTok
-        attachment={attachment}
-        theme={theme}
-        isActive={isActive}
-      />
-    );
-  }
-
   if (kind === "video") {
     return (
       <FeedVideo
@@ -412,197 +632,11 @@ export function FeedMedia({
     );
   }
 
-  if (kind === "audio") {
-    return <FeedAudio attachment={attachment} theme={theme} />;
-  }
-
   if (kind === "file") {
     return <FeedFile attachment={attachment} theme={theme} />;
   }
 
   return null;
-}
-
-function FeedTikTok({
-  attachment,
-  theme,
-  isActive = false,
-}: {
-  attachment: FeedAttachment;
-  theme: FeedTheme;
-  isActive?: boolean;
-}) {
-  const videoId = attachment.videoId;
-  const webViewRef = useRef<WebView>(null);
-
-  if (!videoId || !isActive) {
-    return (
-      <View
-        style={[
-          styles.feedVideoStage,
-          {
-            backgroundColor: theme.bg,
-          },
-        ]}
-      />
-    );
-  }
-
-  const playerUrl =
-    `https://www.tiktok.com/player/v1/${videoId}` +
-    `?autoplay=1&muted=0&loop=0` +
-    `&controls=0` +
-    `&description=0` +
-    `&music_info=0` +
-    `&rel=0` +
-    `&native_context_menu=0` +
-    `&closed_caption=0` +
-    `&timestamp=0` +
-    `&progress_bar=0` +
-    `&play_button=0` +
-    `&volume_control=0` +
-    `&fullscreen_button=0`;
-
-  const html = `
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <meta
-          name="viewport"
-          content="width=device-width, initial-scale=1.0, maximum-scale=1.0"
-        />
-        <style>
-          html, body {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background: #000;
-          }
-
-          iframe {
-            border: 0;
-            width: 100%;
-            height: 100%;
-            display: block;
-          }
-        </style>
-      </head>
-
-      <body>
-        <iframe
-          id="nexchat-tiktok-player"
-          src="${playerUrl}"
-          allow="autoplay; fullscreen"
-          allowfullscreen
-          title="NexChat media"
-        ></iframe>
-
-        <script>
-          const player =
-            document.getElementById("nexchat-tiktok-player");
-
-          function sendPlayerCommand(type) {
-            try {
-              player.contentWindow.postMessage(
-                {
-                  type,
-                  "x-tiktok-player": true
-                },
-                "*"
-              );
-            } catch (e) {
-              // Ignore player-command failures.
-            }
-          }
-
-          window.addEventListener("message", function(event) {
-            try {
-              window.ReactNativeWebView.postMessage(
-                JSON.stringify(event.data)
-              );
-            } catch (e) {
-              // Ignore bridge failures.
-            }
-          });
-
-          window.nexchatStartVideo = function() {
-            sendPlayerCommand("unMute");
-            sendPlayerCommand("play");
-          };
-        </script>
-      </body>
-    </html>
-  `;
-
-  return (
-    <View
-      style={[
-        styles.feedVideoStage,
-        {
-          backgroundColor: "#000",
-        },
-      ]}
-    >
-      <WebView
-        ref={webViewRef}
-        key={`tiktok-${videoId}`}
-        source={{
-          html,
-          baseUrl: "https://www.tiktok.com/",
-        }}
-        style={styles.feedVideo}
-        originWhitelist={["*"]}
-        javaScriptEnabled
-        domStorageEnabled
-        allowsInlineMediaPlayback
-        mediaPlaybackRequiresUserAction={false}
-        allowsFullscreenVideo={false}
-        scrollEnabled={false}
-        bounces={false}
-        onLoadStart={() => {
-          console.log("[NEXCHAT TIKTOK] WEBVIEW LOAD START", {
-            videoId,
-          });
-        }}
-        onLoad={() => {
-          console.log("[NEXCHAT TIKTOK] WEBVIEW LOAD", {
-            videoId,
-          });
-        }}
-        onError={(event) => {
-          console.log("[NEXCHAT TIKTOK] WEBVIEW ERROR", {
-            videoId,
-            error: event.nativeEvent,
-          });
-        }}
-        onHttpError={(event) => {
-          console.log("[NEXCHAT TIKTOK] WEBVIEW HTTP ERROR", {
-            videoId,
-            statusCode: event.nativeEvent.statusCode,
-            description: event.nativeEvent.description,
-          });
-        }}
-        onMessage={(event) => {
-          try {
-            const data = JSON.parse(event.nativeEvent.data);
-
-            if (data?.type === "onPlayerReady") {
-              webViewRef.current?.injectJavaScript(`
-                if (window.nexchatStartVideo) {
-                  window.nexchatStartVideo();
-                }
-                true;
-              `);
-            }
-          } catch {
-            // Ignore non-JSON player messages.
-          }
-        }}
-      />
-    </View>
-  );
 }
 
 function FeedVideo({
@@ -1049,66 +1083,6 @@ function FeedVideo({
   );
 }
 
-function FeedAudio({
-  attachment,
-  theme,
-}: {
-  attachment: FeedAttachment;
-  theme: FeedTheme;
-}) {
-  const player = useAudioPlayer(attachment.uri);
-  const status = useAudioPlayerStatus(player);
-
-  const playing = status.playing;
-
-  const togglePlayback = () => {
-    if (playing) {
-      player.pause();
-    } else {
-      player.play();
-}
-  };
-
-  return (
-    <View
-      style={[
-        styles.audioCard,
-        {
-          backgroundColor: theme.bg,
-          borderColor: theme.line,
-        },
-      ]}
-    >
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={playing ? "Pause audio" : "Play audio"}
-        onPress={togglePlayback}
-        style={[
-          styles.audioPlayButton,
-          { backgroundColor: theme.brand },
-        ]}
-      >
-        <Text style={styles.audioPlayText}>
-          {playing ? "Ⅱ" : "▶"}
-        </Text>
-      </Pressable>
-
-      <View style={styles.audioInfo}>
-        <Text
-          style={[styles.attachmentName, { color: theme.ink }]}
-          numberOfLines={2}
-        >
-          {attachment.name || "Audio"}
-        </Text>
-
-        <Text style={[styles.attachmentType, { color: theme.muted }]}>
-          {playing ? "Playing" : "Tap to play"}
-        </Text>
-      </View>
-    </View>
-  );
-    }
-
 function FeedPdf({
   attachment,
   theme,
@@ -1336,22 +1310,63 @@ function PostCard({
     .join("")
     .toUpperCase();
 
-  const openLink = async () => {
-    if (!post.linkUrl) return;
+  const [selectedReaction, setSelectedReaction] =
+    useState<FeedPostReaction | undefined>();
+  const [reactionTrayOpen, setReactionTrayOpen] = useState(false);
+  const [reactionPlayKey, setReactionPlayKey] = useState(0);
+  const reactionLongPressRef = useRef(false);
 
-    try {
-      await Linking.openURL(post.linkUrl);
-    } catch {
-      // Link errors will be handled by the feed interaction layer.
-}
+  useEffect(() => {
+    let active = true;
+
+    void getFeedPostReaction(post.id, userId).then((reaction) => {
+      if (!active) return;
+
+      setSelectedReaction(
+        reaction ??
+          (post.likedBy?.includes(userId) ? "like" : undefined),
+      );
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [post.id, userId, post.likedBy]);
+
+  const handleReaction = async (reaction: FeedPostReaction) => {
+    const result = await toggleFeedPostReaction(
+      post.id,
+      userId,
+      reaction,
+    );
+
+    if (!result) return;
+
+    const removing = selectedReaction === reaction;
+
+    setSelectedReaction(removing ? undefined : reaction);
+
+    if (!removing) {
+      setReactionPlayKey((value) => value + 1);
+    }
+
+    setReactionTrayOpen(false);
+    reactionLongPressRef.current = false;
+    onLike(result);
   };
 
-  const handleLike = async () => {
-    const result = await toggleFeedLike(post.id, userId);
-
-    if (result.post) {
-      onLike(result.post);
+  const handleLikePress = () => {
+    if (reactionLongPressRef.current) {
+      reactionLongPressRef.current = false;
+      return;
     }
+
+    void handleReaction("like");
+  };
+
+  const handleLikeLongPress = () => {
+    reactionLongPressRef.current = true;
+    setReactionTrayOpen(true);
   };
 
   const handleReshare = async () => {
@@ -1370,10 +1385,6 @@ function PostCard({
       : post.attachment
         ? [post.attachment]
         : [];
-
-  const resolvedLink = post.linkUrl
-    ? resolveLink(post.linkUrl)
-    : null;
 
   return (
     <View
@@ -1450,72 +1461,6 @@ function PostCard({
         </Text>
       )}
 
-      {post.type === "link" && post.linkUrl && (
-        <Pressable
-          onPress={openLink}
-          accessibilityRole="link"
-          accessibilityLabel={`Open ${post.linkProvider || resolvedLink?.provider || "website"} link`}
-          style={[
-            styles.linkCard,
-            {
-              backgroundColor: theme.bg,
-              borderColor: theme.line,
-            },
-          ]}
-        >
-          {post.linkImageUri ? (
-            <Image
-              source={{ uri: post.linkImageUri }}
-              style={styles.linkPreviewImage}
-              resizeMode="cover"
-            />
-          ) : null}
-
-          <View style={styles.linkCardContent}>
-            <Text
-              style={[styles.linkLabel, { color: theme.brand }]}
-              numberOfLines={1}
-            >
-              {post.linkProvider ||
-                resolvedLink?.provider ||
-                resolvedLink?.siteName ||
-                "WEBSITE"}
-            </Text>
-
-            <Text
-              style={[styles.linkTitle, { color: theme.ink }]}
-              numberOfLines={2}
-            >
-              {post.linkTitle ||
-                resolvedLink?.title ||
-                "Open shared link"}
-            </Text>
-
-            {post.linkDescription ? (
-              <Text
-                style={[styles.linkDescription, { color: theme.muted }]}
-                numberOfLines={3}
-              >
-                {post.linkDescription}
-              </Text>
-            ) : null}
-
-            <Text
-              style={[styles.linkUrl, { color: theme.muted }]}
-              numberOfLines={1}
-            >
-              {post.linkUrl}
-            </Text>
-
-            <Text
-              style={[styles.linkAction, { color: theme.brand }]}
-            >
-              Open link →
-            </Text>
-          </View>
-        </Pressable>
-      )}
-
       {attachments.length > 1 ? (
         <View style={styles.mediaWrapper}>
           <FeedMediaCarousel
@@ -1524,9 +1469,9 @@ function PostCard({
             isActive={isActive}
             onVideoEnd={onVideoEnd}
             onDoubleTapLike={
-              post.likedBy?.includes(userId)
+              selectedReaction === "like"
                 ? undefined
-                : handleLike
+                : () => void handleReaction("like")
             }
           />
         </View>
@@ -1538,49 +1483,135 @@ function PostCard({
             isActive={isActive}
             onVideoEnd={onVideoEnd}
             onDoubleTapLike={
-              post.likedBy?.includes(userId)
+              selectedReaction === "like"
                 ? undefined
-                : handleLike
+                : () => void handleReaction("like")
             }
           />
         </View>
       ) : null}
 
-      {!!post.music && (
-        <View style={styles.musicWrapper}>
-          <Text style={[styles.musicLabel, { color: theme.muted }]}>
-            🎵 Attached music
-          </Text>
-
-          <FeedAudio attachment={post.music} theme={theme} />
-        </View>
-      )}
-
       <View style={[styles.actionBar, { borderTopColor: theme.line }]}>
-        <Pressable
-          onPress={handleLike}
-          style={styles.actionButton}
-          accessibilityRole="button"
-          accessibilityLabel={
-            post.likedBy?.includes(userId)
-              ? "Unlike post"
-              : "Like post"
-          }
-        >
-          <Text
-            style={[
-              styles.actionText,
-              {
-                color: post.likedBy?.includes(userId)
-                  ? theme.brand
-                  : theme.muted,
-              },
-            ]}
+        <View style={{ flex: 1, position: "relative" }}>
+          <Pressable
+            onPress={handleLikePress}
+            onLongPress={handleLikeLongPress}
+            delayLongPress={350}
+            style={styles.actionButton}
+            accessibilityRole="button"
+            accessibilityLabel={
+              selectedReaction
+                ? `Remove ${selectedReaction} reaction`
+                : "Like post"
+            }
           >
-            {post.likedBy?.includes(userId) ? "♥" : "♡"} Like{" "}
-            {post.likedBy?.length ? post.likedBy.length : ""}
-          </Text>
-        </Pressable>
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 5,
+              }}
+            >
+              <Text
+                style={[
+                  styles.actionText,
+                  {
+                    color: selectedReaction
+                      ? theme.brand
+                      : theme.muted,
+                  },
+                ]}
+              >
+                {selectedReaction === "love"
+                  ? "❤️"
+                  : selectedReaction === "laugh"
+                    ? "😂"
+                    : selectedReaction === "wow"
+                      ? "😮"
+                      : selectedReaction === "sad"
+                        ? "😢"
+                        : selectedReaction === "angry"
+                          ? "😡"
+                          : selectedReaction === "like"
+                            ? "👍"
+                            : "♡"}{" "}
+                {selectedReaction
+                  ? selectedReaction.charAt(0).toUpperCase() +
+                    selectedReaction.slice(1)
+                  : "Like"}{" "}
+                {post.reactions
+                  ? Object.values(post.reactions).reduce(
+                      (sum, count) => sum + count,
+                      0,
+                    )
+                  : post.likedBy?.length
+                    ? post.likedBy.length
+                    : ""}
+              </Text>
+
+              {selectedReaction && reactionPlayKey > 0 && (
+                <AnimatedReactionEmoji
+                  key={reactionPlayKey}
+                  reaction={selectedReaction}
+                  playKey={reactionPlayKey}
+                />
+              )}
+            </View>
+          </Pressable>
+
+          {reactionTrayOpen && (
+            <View
+              style={{
+                position: "absolute",
+                bottom: 48,
+                left: 4,
+                right: 4,
+                minHeight: 50,
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-around",
+                backgroundColor: theme.card,
+                borderColor: theme.line,
+                borderWidth: StyleSheet.hairlineWidth,
+                borderRadius: 26,
+                paddingHorizontal: 4,
+                paddingVertical: 5,
+                zIndex: 30,
+                elevation: 8,
+              }}
+            >
+              {([
+                ["like", "👍"],
+                ["love", "❤️"],
+                ["laugh", "😂"],
+                ["wow", "😮"],
+                ["sad", "😢"],
+                ["angry", "😡"],
+              ] as const).map(([reaction, emoji]) => (
+                <Pressable
+                  key={reaction}
+                  onPress={() => void handleReaction(reaction)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${reaction} reaction`}
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: 20,
+                    alignItems: "center",
+                    justifyContent: "center",
+                    backgroundColor:
+                      selectedReaction === reaction
+                        ? theme.line
+                        : "transparent",
+                  }}
+                >
+                  <Text style={{ fontSize: 24 }}>{emoji}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+        </View>
 
         <Pressable
           onPress={() => onComments(post)}
@@ -1637,9 +1668,26 @@ export function FeedScreen({
   const st = useNexChatStore();
 
   const [posts, setPosts] = useState<FeedPost[]>([]);
+  const [feedSection, setFeedSection] = useState<
+    "reels" | "chronicles" | "images"
+  >("chronicles");
   const [searchQuery, setSearchQuery] = useState("");
   const [showRecentSearches, setShowRecentSearches] = useState(false);
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
+
+  useEffect(() => {
+    let active = true;
+
+    void loadHiddenFeedPostIds().then((ids) => {
+      if (active) {
+        setHiddenPostIds(new Set(ids));
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -1659,6 +1707,7 @@ export function FeedScreen({
   const [profileCreator, setProfileCreator] = useState<FeedCreator | null>(null);
   const [postMenuPost, setPostMenuPost] = useState<FeedPost | null>(null);
   const [audiencePost, setAudiencePost] = useState<FeedPost | null>(null);
+  const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(new Set());
 
   const feedScrollRef = useRef<ScrollView>(null);
   const feedScrollYRef = useRef(0);
@@ -1684,7 +1733,6 @@ export function FeedScreen({
   const [editingPost, setEditingPost] = useState<FeedPost | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [text, setText] = useState("");
-  const [linkUrl, setLinkUrl] = useState("");
   const [attachment, setAttachment] = useState<FeedAttachment | undefined>();
   const [overlayText, setOverlayText] = useState("");
   const [overlayX, setOverlayX] = useState(0.5);
@@ -1872,6 +1920,50 @@ export function FeedScreen({
     updatePostInFeed(updatedPost);
   }, [postMenuPost, updatePostInFeed]);
 
+  const handleTogglePostDownloads = useCallback(async () => {
+    if (!postMenuPost) return;
+
+    const updatedPost = await toggleFeedPostDownloads(postMenuPost.id);
+    updatePostInFeed(updatedPost);
+  }, [postMenuPost, updatePostInFeed]);
+
+  const handleHidePost = useCallback(async () => {
+    if (!postMenuPost) return;
+
+    const postToHide = postMenuPost;
+
+    setPostMenuPost(null);
+
+    const ids = await setFeedPostHidden(postToHide.id, true);
+    setHiddenPostIds(new Set(ids));
+
+    setActiveVideoPostId((current) =>
+      current === postToHide.id ? null : current,
+    );
+
+    delete postLayoutsRef.current[postToHide.id];
+
+    Alert.alert(
+      "Post hidden",
+      "You won't see this post in your feed anymore.",
+      [
+        {
+          text: "Undo",
+          onPress: async () => {
+            const restoredIds = await setFeedPostHidden(
+              postToHide.id,
+              false,
+            );
+            setHiddenPostIds(new Set(restoredIds));
+          },
+        },
+        {
+          text: "Done",
+        },
+      ],
+    );
+  }, [postMenuPost]);
+
   const handleArchivePost = useCallback(async () => {
     if (!postMenuPost) return;
 
@@ -1970,10 +2062,20 @@ export function FeedScreen({
   }, []);
 
   const handlePostDownload = useCallback(async (post: FeedPost) => {
+    if (
+      post.allowDownloads === false &&
+      post.creator.id !== creator.id
+    ) {
+      Alert.alert(
+        "Downloads disabled",
+        "The creator has disabled downloads for this post.",
+      );
+      return;
+    }
+
     const attachment =
       post.attachment ??
-      post.attachments?.[0] ??
-      post.music;
+      post.attachments?.[0];
 
     setPublishing(true);
 
@@ -2042,9 +2144,7 @@ export function FeedScreen({
           ? "image"
           : attachment.mimeType?.startsWith("video/")
             ? "video"
-            : attachment.mimeType?.startsWith("audio/")
-              ? "audio"
-              : "file");
+            : "file");
 
       if (!attachment.uri) {
         Alert.alert(
@@ -2089,9 +2189,7 @@ export function FeedScreen({
         await Sharing.shareAsync(attachment.uri, {
           mimeType:
             attachment.mimeType ||
-            (kind === "audio"
-              ? "audio/*"
-              : "application/octet-stream"),
+            "application/octet-stream",
           dialogTitle: `Save ${attachment.name || "NexChat file"}`,
         });
 
@@ -2117,7 +2215,7 @@ export function FeedScreen({
     } finally {
       setPublishing(false);
     }
-  }, []);
+  }, [creator.id]);
 
   const openComments = useCallback(async (post: FeedPost) => {
     setActiveCommentPost(post);
@@ -2265,16 +2363,10 @@ export function FeedScreen({
   ]);
 
   const refresh = useCallback(async () => {
-    console.log("[NEXCHAT FEED] refresh START");
     setLoading(true);
 
     try {
-      console.log("[NEXCHAT FEED] calling loadFeedPosts");
       const loadedPosts = await loadFeedPosts();
-      console.log(
-        "[NEXCHAT FEED] loadFeedPosts DONE",
-        loadedPosts.length,
-      );
       const contactIds = st.contacts
         .filter((contact) => !contact.blocked)
         .map((contact) => contact.id);
@@ -2325,7 +2417,7 @@ export function FeedScreen({
 
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
 
-  const visiblePosts = useMemo(() => {
+  const searchedPosts = useMemo(() => {
     if (!normalizedSearchQuery) {
       return posts;
     }
@@ -2347,6 +2439,40 @@ export function FeedScreen({
     });
   }, [posts, normalizedSearchQuery]);
 
+  const visiblePosts = useMemo(() => {
+    return searchedPosts.filter((post) => {
+      if (hiddenPostIds.has(post.id)) {
+        return false;
+      }
+
+      const primaryAttachment =
+        post.attachment ?? post.attachments?.[0];
+
+      const kind = primaryAttachment?.kind;
+
+      if (feedSection === "reels") {
+        return (
+          kind === "video" ||
+          primaryAttachment?.mimeType?.startsWith("video/")
+        );
+      }
+
+      if (feedSection === "images") {
+        return (
+          kind === "image" ||
+          primaryAttachment?.mimeType?.startsWith("image/")
+        );
+      }
+
+      return (
+        kind !== "video" &&
+        kind !== "image" &&
+        !primaryAttachment?.mimeType?.startsWith("video/") &&
+        !primaryAttachment?.mimeType?.startsWith("image/")
+      );
+    });
+  }, [searchedPosts, feedSection, hiddenPostIds]);
+
   const handleSearchSubmit = useCallback(async () => {
     const normalized = searchQuery.trim();
 
@@ -2364,9 +2490,25 @@ export function FeedScreen({
     setRecentSearches(await loadRecentFeedSearches());
   }, []);
 
+  const beginEditPost = (post: FeedPost) => {
+    const existingAttachment =
+      post.attachment ?? post.attachments?.[0];
+
+    setEditingPost(post);
+    setText(post.text ?? "");
+    setAttachment(existingAttachment);
+
+    setOverlayText(existingAttachment?.overlayText ?? "");
+    setOverlayX(existingAttachment?.overlayX ?? 0.5);
+    setOverlayY(existingAttachment?.overlayY ?? 0.5);
+
+    setOverlayEditorOpen(false);
+    setPostMenuPost(null);
+    setComposerOpen(true);
+  };
+
   const resetComposer = () => {
     setText("");
-    setLinkUrl("");
     setAttachment(undefined);
     setOverlayText("");
     setOverlayX(0.5);
@@ -2431,10 +2573,6 @@ export function FeedScreen({
         mimeType: asset.mimeType ?? undefined,
         size: asset.fileSize ?? undefined,
         kind: mediaType,
-        durationMs:
-          asset.duration != null
-            ? Math.round(asset.duration * 1000)
-            : undefined,
         overlayText: "",
         overlayX: 0.5,
         overlayY: 0.5,
@@ -2522,35 +2660,17 @@ export function FeedScreen({
     }
   };
 
-  const beginEditPost = useCallback((post: FeedPost) => {
-    setPostMenuPost(null);
-    setEditingPost(post);
-    setText(post.text ?? "");
-    setLinkUrl(post.linkUrl ?? "");
-
-    const primaryAttachment =
-      post.attachment ??
-      post.attachments?.[0];
-
-    setAttachment(primaryAttachment);
-
-    setOverlayText(primaryAttachment?.overlayText ?? "");
-    setOverlayX(primaryAttachment?.overlayX ?? 0.5);
-    setOverlayY(primaryAttachment?.overlayY ?? 0.5);
-    setOverlayEditorOpen(false);
-    setComposerOpen(true);
-  }, []);
 
   const saveEditedPost = async (type: FeedPostType) => {
     if (!editingPost) return;
 
     const cleanText = text.trim();
 
-    if (!cleanText && !attachment && !linkUrl.trim()) {
+    if (!cleanText && !attachment) {
       return;
     }
 
-    let editedAttachment = attachment
+    const editedAttachment = attachment
       ? {
           ...attachment,
           overlayText: overlayText.trim() || undefined,
@@ -2562,119 +2682,11 @@ export function FeedScreen({
     setPublishing(true);
 
     try {
-      const cleanLink = linkUrl.match(/https?:\/\/[^\s]+/i)?.[0]?.trim() || "";
-      let editedType: FeedPostType = type;
-
-      const resolvedLink = cleanLink
-        ? await resolveLinkMetadata(cleanLink)
-        : null;
-
-      if (
-        resolvedLink &&
-        !editedAttachment
-      ) {
-        if (resolvedLink.isDirectMedia) {
-          const downloadedUri =
-            await downloadDirectLink(resolvedLink);
-
-          const ingested =
-            await ingestAttachment({
-              uri: downloadedUri,
-              name:
-                resolvedLink.url
-                  .split("?")[0]
-                  .split("/")
-                  .pop() || undefined,
-              mimeType:
-                resolvedLink.mimeType ||
-                (resolvedLink.kind === "image"
-                  ? "image/jpeg"
-                  : resolvedLink.kind === "video"
-                    ? "video/mp4"
-                    : resolvedLink.kind === "audio"
-                      ? "audio/mpeg"
-                      : "application/octet-stream"),
-              type:
-                resolvedLink.kind === "image" ||
-                resolvedLink.kind === "video" ||
-                resolvedLink.kind === "audio" ||
-                resolvedLink.kind === "file"
-                  ? resolvedLink.kind
-                  : "file",
-            });
-
-          editedAttachment = {
-            uri: ingested.attachment.uri,
-            name: ingested.attachment.name,
-            mimeType: ingested.attachment.mimeType,
-            size: ingested.attachment.size,
-            kind:
-              resolvedLink.kind === "image" ||
-              resolvedLink.kind === "video" ||
-              resolvedLink.kind === "audio" ||
-              resolvedLink.kind === "file"
-                ? resolvedLink.kind
-                : "file",
-            overlayText: overlayText.trim() || undefined,
-            overlayX,
-            overlayY,
-          };
-
-          editedType = "media";
-        } else if (resolvedLink.imageUri) {
-          editedAttachment = {
-            uri: resolvedLink.imageUri,
-            name: `${resolvedLink.provider || resolvedLink.siteName || "link"}-media`,
-            kind: "image",
-            mimeType: "image/jpeg",
-            overlayText: overlayText.trim() || undefined,
-            overlayX,
-            overlayY,
-          };
-
-          editedType = "media";
-        } else if (cleanLink && !cleanText) {
-          console.log(
-            "[NEXCHAT LINK MEDIA] MEDIA NOT INGESTED - FALLING BACK TO LINK",
-            {
-              link: cleanLink,
-              resolvedKind: resolvedLink.kind,
-              provider:
-                resolvedLink.provider ||
-                resolvedLink.siteName ||
-                null,
-              imageUri: resolvedLink.imageUri || null,
-            },
-          );
-        }
-      }
-
       const updatedPost = await updateFeedPost(
         editingPost.id,
         {
-          type: editedType,
+          type,
           text: cleanText,
-          linkUrl:
-            editedType === "media"
-              ? undefined
-              : cleanLink || undefined,
-          linkTitle:
-            editedType === "media"
-              ? undefined
-              : resolvedLink?.title,
-          linkDescription:
-            editedType === "media"
-              ? undefined
-              : resolvedLink?.description,
-          linkImageUri:
-            editedType === "media"
-              ? undefined
-              : resolvedLink?.imageUri,
-          linkProvider:
-            editedType === "media"
-              ? undefined
-              : resolvedLink?.provider ||
-                resolvedLink?.siteName,
           attachment: editedAttachment,
           attachments: editedAttachment
             ? [editedAttachment]
@@ -2703,16 +2715,15 @@ export function FeedScreen({
 
   const publish = async (type: FeedPostType) => {
     const cleanText = text.trim();
-    const cleanLink = linkUrl.match(/https?:\/\/[^\s]+/i)?.[0]?.trim() || "";
 
-    if (!cleanText && !attachment && !cleanLink) {
+    if (!cleanText && !attachment) {
       return;
     }
 
     setPublishing(true);
 
     try {
-      let publishAttachment = attachment
+      const publishAttachment = attachment
         ? {
             ...attachment,
             overlayText: overlayText.trim() || undefined,
@@ -2721,126 +2732,10 @@ export function FeedScreen({
           }
         : undefined;
 
-      let publishType: FeedPostType = type;
-
-      const resolvedLink = cleanLink
-        ? await resolveLinkMetadata(cleanLink)
-        : null;
-
-      if (
-        resolvedLink &&
-        !publishAttachment
-      ) {
-        if (resolvedLink.isDirectMedia) {
-          const downloadedUri =
-            await downloadDirectLink(resolvedLink);
-
-          const ingested =
-            await ingestAttachment({
-              uri: downloadedUri,
-              name:
-                resolvedLink.url
-                  .split("?")[0]
-                  .split("/")
-                  .pop() || undefined,
-              mimeType:
-                resolvedLink.mimeType ||
-                (resolvedLink.kind === "image"
-                  ? "image/jpeg"
-                  : resolvedLink.kind === "video"
-                    ? "video/mp4"
-                    : resolvedLink.kind === "audio"
-                      ? "audio/mpeg"
-                      : "application/octet-stream"),
-              type:
-                resolvedLink.kind === "image" ||
-                resolvedLink.kind === "video" ||
-                resolvedLink.kind === "audio" ||
-                resolvedLink.kind === "file"
-                  ? resolvedLink.kind
-                  : "file",
-            });
-
-          publishAttachment = {
-            uri: ingested.attachment.uri,
-            name: ingested.attachment.name,
-            mimeType: ingested.attachment.mimeType,
-            size: ingested.attachment.size,
-            kind:
-              resolvedLink.kind === "image" ||
-              resolvedLink.kind === "video" ||
-              resolvedLink.kind === "audio" ||
-              resolvedLink.kind === "file"
-                ? resolvedLink.kind
-                : "file",
-            overlayText: overlayText.trim() || undefined,
-            overlayX,
-            overlayY,
-          };
-
-          publishType = "media";
-        } else if (resolvedLink.imageUri) {
-          publishAttachment = {
-            uri: resolvedLink.imageUri,
-            name: `${resolvedLink.provider || resolvedLink.siteName || "link"}-media`,
-            kind: "image",
-            mimeType: "image/jpeg",
-            overlayText: overlayText.trim() || undefined,
-            overlayX,
-            overlayY,
-          };
-
-          publishType = "media";
-        } else if (cleanLink && !cleanText) {
-          console.log(
-            "[NEXCHAT LINK MEDIA] MEDIA NOT INGESTED - FALLING BACK TO LINK",
-            {
-              link: cleanLink,
-              resolvedKind: resolvedLink.kind,
-              provider:
-                resolvedLink.provider ||
-                resolvedLink.siteName ||
-                null,
-              imageUri: resolvedLink.imageUri || null,
-            },
-          );
-        }
-      }
-
-      console.log("[NEXCHAT LINK MEDIA] PUBLISH", {
-        link: cleanLink || null,
-        resolvedKind: resolvedLink?.kind || null,
-        attachmentUri: publishAttachment?.uri || null,
-        attachmentKind: publishAttachment?.kind || null,
-        attachmentMimeType: publishAttachment?.mimeType || null,
-        publishType,
-      });
-
       await createFeedPost({
-        type: publishType,
+        type,
         creator,
         text: cleanText,
-        linkUrl:
-          publishType === "media"
-            ? undefined
-            : cleanLink || undefined,
-        linkTitle:
-          publishType === "media"
-            ? undefined
-            : resolvedLink?.title,
-        linkDescription:
-          publishType === "media"
-            ? undefined
-            : resolvedLink?.description,
-        linkImageUri:
-          publishType === "media"
-            ? undefined
-            : resolvedLink?.imageUri,
-        linkProvider:
-          publishType === "media"
-            ? undefined
-            : resolvedLink?.provider ||
-              resolvedLink?.siteName,
         attachment: publishAttachment,
       });
 
@@ -2852,7 +2747,7 @@ export function FeedScreen({
         "Could not publish",
         error instanceof Error
           ? error.message
-          : "NexChat could not download or publish that link.",
+          : "NexChat could not publish this post.",
       );
     } finally {
       setPublishing(false);
@@ -2989,42 +2884,78 @@ export function FeedScreen({
     [updateActiveVideo],
   );
 
-  const handleVideoEnd = useCallback(
-    (postId: string): boolean => {
-      const currentIndex = posts.findIndex(
-        (post) => post.id === postId,
-      );
+  const navigateFeedSection = useCallback(
+    (direction: "left" | "right") => {
+      const sections: Array<"reels" | "chronicles" | "images"> = [
+        "reels",
+        "chronicles",
+        "images",
+      ];
+
+      const currentIndex = sections.indexOf(feedSection);
 
       if (currentIndex === -1) {
-        return false;
+        return;
       }
 
-      const nextVideoIndex = posts.findIndex(
-        (post, index) =>
-          index > currentIndex &&
-          postHasVideo(post),
-      );
+      const nextIndex =
+        direction === "left"
+          ? currentIndex + 1
+          : currentIndex - 1;
 
-      if (nextVideoIndex === -1) {
-        return false;
+      if (
+        nextIndex < 0 ||
+        nextIndex >= sections.length
+      ) {
+        return;
       }
 
-      const nextPost = posts[nextVideoIndex];
-      const nextLayout =
-        postLayoutsRef.current[nextPost.id];
+      setFeedSection(sections[nextIndex]);
+      setActiveVideoPostId(null);
 
-      if (!nextLayout) {
-        return false;
-      }
-
-      feedScrollRef.current?.scrollTo({
-        y: Math.max(0, nextLayout.y),
-        animated: true,
+      requestAnimationFrame(() => {
+        feedScrollRef.current?.scrollTo({
+          y: 0,
+          animated: false,
+        });
       });
-
-      return true;
     },
-    [posts, postHasVideo],
+    [feedSection],
+  );
+
+  const feedSwipeResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponderCapture: () => false,
+
+        onMoveShouldSetPanResponderCapture: (_, gestureState) => {
+          const absDx = Math.abs(gestureState.dx);
+          const absDy = Math.abs(gestureState.dy);
+
+          return (
+            absDx > 24 &&
+            absDx > absDy * 1.35
+          );
+        },
+
+        onPanResponderRelease: (_, gestureState) => {
+          const absDx = Math.abs(gestureState.dx);
+          const absDy = Math.abs(gestureState.dy);
+
+          if (
+            absDx >= 60 &&
+            absDx > absDy * 1.35
+          ) {
+            navigateFeedSection(
+              gestureState.dx < 0 ? "left" : "right",
+            );
+          }
+        },
+
+        onPanResponderTerminationRequest: () => false,
+        onShouldBlockNativeResponder: () => false,
+      }),
+    [navigateFeedSection],
   );
 
   if (profileCreator) {
@@ -3164,6 +3095,84 @@ export function FeedScreen({
 
       </View>
 
+      <View
+        style={[
+          styles.feedSectionTabs,
+          {
+            backgroundColor: theme.card,
+            borderBottomColor: theme.line,
+          },
+        ]}
+      >
+        {(
+          [
+            ["reels", "Reels", "▶"],
+            ["chronicles", "Chronicles", "✎"],
+            ["images", "Images", "▧"],
+          ] as const
+        ).map(([section, label, icon]) => {
+          const active = feedSection === section;
+
+          return (
+            <Pressable
+              key={section}
+              onPress={() => {
+                setFeedSection(section);
+                setActiveVideoPostId(null);
+                requestAnimationFrame(() => {
+                  feedScrollRef.current?.scrollTo({
+                    y: 0,
+                    animated: false,
+                  });
+                });
+              }}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: active }}
+              accessibilityLabel={`${label} feed`}
+              style={({ pressed }) => [
+                styles.feedSectionTab,
+                {
+                  borderBottomColor: active
+                    ? theme.brand
+                    : "transparent",
+                  opacity: pressed ? 0.65 : 1,
+                },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.feedSectionTabIcon,
+                  {
+                    color: active
+                      ? theme.brand
+                      : theme.muted,
+                  },
+                ]}
+              >
+                {icon}
+              </Text>
+
+              <Text
+                style={[
+                  styles.feedSectionTabText,
+                  {
+                    color: active
+                      ? theme.ink
+                      : theme.muted,
+                  },
+                ]}
+              >
+                {label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+
+      <View
+        style={{ flex: 1 }}
+        {...feedSwipeResponder.panHandlers}
+      >
       {loading ? (
         <View style={styles.center}>
           <ActivityIndicator />
@@ -3216,12 +3225,14 @@ export function FeedScreen({
               onProfile={handleOpenProfile}
               onPostMenu={openPostMenu}
               isActive={activeVideoPostId === post.id}
-              onVideoEnd={() => handleVideoEnd(post.id)}
+              onVideoEnd={() => false}
               onLayout={handlePostLayout(post.id)}
             />
           ))}
         </ScrollView>
       )}
+
+      </View>
 
       <Modal
         visible={!!postMenuPost}
@@ -3337,6 +3348,36 @@ export function FeedScreen({
 
                 <Pressable
                   style={styles.postMenuItem}
+                  onPress={handleTogglePostDownloads}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    {postMenuPost?.allowDownloads === false
+                      ? "Allow downloads"
+                      : "Turn off downloads"}
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.postMenuItem}
+                  onPress={handleHidePost}
+                >
+                  <Text
+                    style={[
+                      styles.postMenuItemText,
+                      { color: theme.ink },
+                    ]}
+                  >
+                    Hide post
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.postMenuItem}
                   onPress={handleArchivePost}
                 >
                   <Text
@@ -3386,13 +3427,7 @@ export function FeedScreen({
 
                 <Pressable
                   style={styles.postMenuItem}
-                  onPress={() => {
-                    closePostMenu();
-                    Alert.alert(
-                      "Not interested",
-                      "We'll use this preference to improve your feed.",
-                    );
-                  }}
+                  onPress={handleHidePost}
                 >
                   <Text
                     style={[
@@ -3400,7 +3435,7 @@ export function FeedScreen({
                       { color: theme.ink },
                     ]}
                   >
-                    Not interested
+                    Hide post
                   </Text>
                 </Pressable>
 
@@ -4308,33 +4343,6 @@ export function FeedScreen({
                   ]}
                 />
 
-                <Text
-                  style={[
-                    styles.createPostCaption,
-                    { color: theme.muted, marginTop: 12 },
-                  ]}
-                >
-                  Link
-                </Text>
-
-                <TextInput
-                  value={linkUrl}
-                  onChangeText={setLinkUrl}
-                  placeholder="Paste a link to turn it into media"
-                  placeholderTextColor={theme.muted}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  keyboardType="url"
-                  style={[
-                    styles.textInput,
-                    {
-                      color: theme.ink,
-                      borderColor: theme.line,
-                      backgroundColor: theme.bg,
-                      minHeight: 48,
-                    },
-                  ]}
-                />
               </View>
 
               <View style={styles.composerTools}>
@@ -4402,6 +4410,7 @@ export function FeedScreen({
                     🎥 Video
                   </Text>
                 </Pressable>
+
               </View>
 
               <View style={styles.publishRow}>
@@ -4421,18 +4430,13 @@ export function FeedScreen({
                 <Pressable
                   onPress={() => {
                     const attachmentKind = attachment?.kind;
-                    const cleanText = text.trim();
-                    const cleanLink = linkUrl.match(/https?:\/\/[^\s]+/i)?.[0]?.trim() || "";
 
                     const postType: FeedPostType =
                       attachmentKind === "image" ||
                       attachmentKind === "video" ||
-                      attachmentKind === "audio" ||
                       attachmentKind === "file"
                         ? "media"
-                        : cleanLink && !cleanText
-                          ? "link"
-                          : "text";
+                        : "text";
 
                     if (editingPost) {
                       void saveEditedPost(postType);
@@ -4442,14 +4446,14 @@ export function FeedScreen({
                   }}
                   disabled={
                     publishing ||
-                    (!text.trim() && !attachment && !linkUrl.trim())
+                    (!text.trim() && !attachment)
                   }
                   style={[
                     styles.publishButton,
                     {
                       backgroundColor:
                         publishing ||
-                        (!text.trim() && !attachment && !linkUrl.trim())
+                        (!text.trim() && !attachment)
                           ? theme.muted
                           : theme.brand,
                     },
@@ -4774,6 +4778,33 @@ const styles = StyleSheet.create({
   subtitle: {
     fontSize: 13,
     marginTop: 2,
+  },
+
+  feedSectionTabs: {
+    minHeight: 54,
+    flexDirection: "row",
+    alignItems: "stretch",
+    borderBottomWidth: 1,
+  },
+
+  feedSectionTab: {
+    flex: 1,
+    minHeight: 54,
+    alignItems: "center",
+    justifyContent: "center",
+    borderBottomWidth: 2,
+    paddingVertical: 7,
+  },
+
+  feedSectionTabIcon: {
+    fontSize: 16,
+    lineHeight: 18,
+    marginBottom: 2,
+  },
+
+  feedSectionTabText: {
+    fontSize: 12,
+    fontWeight: "700",
   },
 
   feedSearch: {

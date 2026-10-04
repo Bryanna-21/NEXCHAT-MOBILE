@@ -139,7 +139,7 @@ export async function getIdentity(): Promise<Identity> {
 
     let changed = false;
 
-    if (!identity.publicKey) {
+    if (identity.publicKey !== publicKey) {
       identity.publicKey = publicKey;
       changed = true;
     }

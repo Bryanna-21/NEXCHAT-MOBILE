@@ -27,6 +27,7 @@ export interface BluetoothTransport {
 export class NativeBluetoothTransport
   implements BluetoothTransport
 {
+  readonly kind = "nearby-bluetooth" as const;
   async isAvailable(): Promise<boolean> {
     return false;
   }

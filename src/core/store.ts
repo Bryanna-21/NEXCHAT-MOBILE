@@ -8,7 +8,10 @@ import {
   NexTransport,
 } from "./transport/protocol";
 import { LocalTransport } from "./transport/local";
-import { InternetRelayTransport } from "./transport/internet";
+import {
+  InternetRelayTransport,
+  DirectoryUser,
+} from "./transport/internet";
 import { TransportRouter } from "./transport/router";
 import {
   transition,
@@ -32,6 +35,10 @@ import {
   markDelivered,
   markDeliveredByMessageId,
 } from "./transport/queue";
+import { initializePeerStore } from "./transport/peerStore";
+import { NearbyPeerBridge } from "./transport/nearbyBridge";
+import { NativeBluetoothTransport } from "./bluetooth";
+import { NativeWiFiDirectTransport } from "./wifiDirect";
 
 import {
   DeliveryWorker,
@@ -118,7 +125,12 @@ export type CallHistoryEntry = {
   peerId: string;
   type: "voice" | "video";
   direction: "outgoing" | "incoming";
-  status: "completed" | "failed" | "missed" | "declined";
+  status:
+    | "completed"
+    | "failed"
+    | "missed"
+    | "declined"
+    | "cancelled";
   startedAt: string;
   connectedAt?: string;
   endedAt: string;
@@ -299,28 +311,34 @@ let state: {
 const listeners = new Set<() => void>();
 const callSignalListeners =
   new Set<(signal: CallSignal) => void>();
+const incomingMessageListeners =
+  new Set<(message: Message) => void>();
 
 let relayTransport: InternetRelayTransport | null = null;
 let relayTransportIdentityId = "";
 let relayTransportUrl = "";
 
+let nearbyPeerBridge: NearbyPeerBridge | null = null;
+let nearbyPeerBridgeIdentityId = "";
+
 async function handleIncomingRelayEnvelope(
   envelope: import("./transport/protocol").TransportEnvelope,
   offline: boolean,
-): Promise<void> {
+  acknowledgeRelay = true,
+): Promise<boolean> {
   const identity = await getIdentity();
 
-  if (!identity?.id) return;
+  if (!identity?.id) return false;
 
   /*
    * Never accept an envelope addressed to somebody else.
    */
   if (envelope.recipientId !== identity.id) {
-    return;
+    return false;
   }
 
   if (envelope.senderId === identity.id) {
-    return;
+    return false;
   }
 
   console.log(
@@ -363,7 +381,7 @@ async function handleIncomingRelayEnvelope(
       },
     );
 
-    return;
+    return false;
   }
 
   /*
@@ -377,14 +395,14 @@ async function handleIncomingRelayEnvelope(
     !decoded.id ||
     typeof decoded.text !== "string"
   ) {
-    return;
+    return false;
   }
 
   if (
     decoded.id !== envelope.messageId ||
     decoded.recipientId !== envelope.recipientId
   ) {
-    return;
+    return false;
   }
 
   /*
@@ -500,6 +518,10 @@ async function handleIncomingRelayEnvelope(
       conversations,
       contacts: updatedContacts,
     });
+
+    for (const listener of incomingMessageListeners) {
+      listener(incomingMessage);
+    }
   } else if (updatedContacts !== state.contacts) {
     await queuePersist({
       contacts: updatedContacts,
@@ -507,16 +529,21 @@ async function handleIncomingRelayEnvelope(
   }
 
   /*
-   * Only acknowledge after authentication and local persistence.
-   * This is what allows the relay to remove its durable copy and
-   * tells the sender that this device actually received it.
+   * Only acknowledge the Internet relay when this message actually
+   * arrived through the relay. Nearby delivery uses the application-
+   * layer PeerDeliveryAck handled by NearbyPeerBridge.
+   *
+   * In both cases, acknowledgement happens only after authentication
+   * and local persistence.
    */
-  if (relayTransport) {
+  if (acknowledgeRelay && relayTransport) {
     await relayTransport.acknowledgeDelivery(
       incomingMessage.id,
       envelope.senderId,
     );
   }
+
+  return true;
 }
 
 async function markMessageDelivered(
@@ -577,6 +604,127 @@ async function markMessageDelivered(
   });
 }
 
+async function markMessageRead(
+  messageId: string,
+  recipientId: string,
+): Promise<void> {
+  const conversation = findConversation(
+    recipientId,
+  );
+
+  if (!conversation) return;
+
+  let changed = false;
+
+  const messages = conversation.messages.map(
+    message => {
+      if (
+        message.id !== messageId ||
+        message.senderId !== "me" ||
+        message.recipientId !== recipientId ||
+        message.status !== "delivered"
+      ) {
+        return message;
+      }
+
+      changed = true;
+
+      return {
+        ...message,
+        status: "read" as MessageStatus,
+      };
+    },
+  );
+
+  if (!changed) return;
+
+  const updatedConversation: Conversation = {
+    ...conversation,
+    messages,
+  };
+
+  await queuePersist({
+    conversations:
+      state.conversations.map(
+        item =>
+          item.peerId === recipientId
+            ? updatedConversation
+            : item,
+      ),
+  });
+}
+
+async function markConversationRead(
+  peerId: string,
+): Promise<void> {
+  const conversation = findConversation(peerId);
+
+  if (!conversation) {
+    return;
+  }
+
+  let changed = false;
+  const readMessageIds: string[] = [];
+
+  const messages = conversation.messages.map(
+    message => {
+      if (
+        message.senderId === "me" ||
+        message.status === "read"
+      ) {
+        return message;
+      }
+
+      if (
+        message.status === "delivered" ||
+        message.status === "sent"
+      ) {
+        changed = true;
+        readMessageIds.push(message.id);
+
+        return {
+          ...message,
+          status: "read" as MessageStatus,
+        };
+      }
+
+      return message;
+    },
+  );
+
+  if (
+    !changed &&
+    (conversation.unreadCount ?? 0) === 0
+  ) {
+    return;
+  }
+
+  const updatedConversation: Conversation = {
+    ...conversation,
+    messages,
+    unreadCount: 0,
+  };
+
+  await queuePersist({
+    conversations:
+      state.conversations.map(
+        item =>
+          item.peerId === peerId
+            ? updatedConversation
+            : item,
+      ),
+  });
+
+  if (state.settings.readReceipts) {
+    for (const messageId of readMessageIds) {
+      await sendReadReceipt(
+        peerId,
+        messageId,
+      );
+    }
+  }
+}
+
 async function updateContactPresence(
   identityId: string,
   online: boolean,
@@ -614,6 +762,98 @@ async function updateContactPresence(
   await queuePersist({
     contacts: updatedContacts,
   });
+}
+
+function configureNearbyPeerBridge(
+  identityId: string,
+): void {
+  /*
+   * Recreate the bridge when the authenticated local identity changes.
+   * This keeps all nearby routing scoped to the current device identity.
+   */
+  if (
+    nearbyPeerBridge &&
+    nearbyPeerBridgeIdentityId === identityId
+  ) {
+    nearbyPeerBridge.start();
+    return;
+  }
+
+  if (nearbyPeerBridge) {
+    nearbyPeerBridge.stop();
+    nearbyPeerBridge = null;
+  }
+
+  nearbyPeerBridge = new NearbyPeerBridge(
+    [
+      new NativeBluetoothTransport(),
+      new NativeWiFiDirectTransport(),
+    ],
+    {
+      getIdentityId: () => identityId,
+
+      /*
+       * Nearby final delivery deliberately reuses the same authenticated
+       * message path as Internet relay delivery. The bridge itself never
+       * decrypts the payload.
+       */
+      onFinalDelivery: async packet => {
+        return handleIncomingRelayEnvelope(
+          packet.envelope,
+          true,
+          false,
+        );
+      },
+
+      /*
+       * A nearby delivery ACK reaches the original sender through the
+       * recorded reverse path. Only the originating device settles the
+       * durable outbound queue/message state.
+       */
+      onDeliveryAck: async packet => {
+        if (!packet.messageId) return;
+
+        await markMessageDelivered(
+          packet.messageId,
+          packet.recipientId,
+        );
+      },
+    },
+  );
+
+  nearbyPeerBridgeIdentityId = identityId;
+
+  /*
+   * Keep durable nearby custody delivery active while this
+   * authenticated identity is active. The bridge prevents
+   * overlapping flushes internally.
+   */
+  nearbyPeerBridge.start();
+}
+
+async function handleReadReceiptEvent(event: import("./transport/protocol").TransportEvent): Promise<void> {
+  if (!event.payload) return;
+
+  try {
+    const payload = JSON.parse(event.payload) as {
+      messageId?: string;
+    };
+
+    if (!payload.messageId) return;
+
+    const message = findConversation(event.senderId)
+      ?.messages.find(item => item.id === payload.messageId);
+
+    if (!message) return;
+
+    if (message.recipientId !== event.senderId) return;
+
+    if (message.senderId !== "me") return;
+
+    await markMessageRead(payload.messageId, event.senderId);
+  } catch {
+    // Invalid read receipts must never crash the relay.
+  }
 }
 
 function configureRelayTransport(identityId: string): void {
@@ -679,10 +919,30 @@ function configureRelayTransport(identityId: string): void {
     },
 
     onEvent: async (event) => {
-      if (
-        event.kind !== "call-signal" ||
-        !event.payload
-      ) {
+      if (!event.payload) {
+        return;
+      }
+
+      if (event.kind === "read-receipt") {
+        if (
+          event.recipientId !== identityId ||
+          !event.senderId
+        ) {
+          return;
+        }
+
+        if (
+          Date.parse(event.createdAt) + 60_000 <
+          Date.now()
+        ) {
+          return;
+        }
+
+        await handleReadReceiptEvent(event);
+        return;
+      }
+
+      if (event.kind !== "call-signal") {
         return;
       }
 
@@ -814,6 +1074,16 @@ export function subscribeCallSignals(
   };
 }
 
+export function subscribeIncomingMessages(
+  listener: (message: Message) => void,
+): () => void {
+  incomingMessageListeners.add(listener);
+
+  return () => {
+    incomingMessageListeners.delete(listener);
+  };
+}
+
 export async function sendCallSignal(
   peerId: string,
   callId: string,
@@ -877,6 +1147,42 @@ export async function sendTypingEvent(
       new Date(
         now + 5000,
       ).toISOString(),
+  });
+}
+
+export async function sendReadReceipt(
+  peerId: string,
+  messageId: string,
+): Promise<boolean> {
+  const identity = await getIdentity();
+
+  if (
+    !identity?.id ||
+    !peerId ||
+    !messageId
+  ) {
+    return false;
+  }
+
+  const now = Date.now();
+
+  return getTransportRouter(identity.id).sendEvent({
+    id:
+      `read-${now}-${Math.random()
+        .toString(36)
+        .slice(2, 10)}`,
+    kind: "read-receipt",
+    senderId: identity.id,
+    recipientId: peerId,
+    createdAt:
+      new Date(now).toISOString(),
+    expiresAt:
+      new Date(
+        now + 60_000,
+      ).toISOString(),
+    payload: JSON.stringify({
+      messageId,
+    }),
   });
 }
 
@@ -1039,30 +1345,90 @@ function queuePersist(
 }
 
 export async function initializeNetworkTransport(): Promise<void> {
+  console.log("[NEXCHAT BOOT NET 01] initializeNetworkTransport START");
+
   /*
    * Restore the durable encrypted offline queue before
    * the network/relay transport begins processing messages.
    */
+  console.log("[NEXCHAT BOOT NET 02] initializeQueue START");
   await initializeQueue();
+  console.log("[NEXCHAT BOOT NET 02] initializeQueue OK");
+
+  /*
+   * Restore durable nearby-peer custody before any
+   * nearby forwarding or ACK processing begins.
+   */
+  console.log("[NEXCHAT BOOT NET 03] initializePeerStore START");
+  await initializePeerStore();
+  console.log("[NEXCHAT BOOT NET 03] initializePeerStore OK");
 
   /*
    * A process can disappear while an item is in "sending".
    * Those items are safe to retry after startup.
    */
+  console.log("[NEXCHAT BOOT NET 04] recoverInterruptedItems START");
   recoverInterruptedItems();
+  console.log("[NEXCHAT BOOT NET 04] recoverInterruptedItems OK");
 
+  console.log("[NEXCHAT BOOT NET 05] getIdentity START");
   const identity = await getIdentity();
+  console.log("[NEXCHAT BOOT NET 05] getIdentity OK", {
+    id: identity?.id,
+  });
 
-  if (!identity?.id) return;
+  if (!identity?.id) {
+    console.log("[NEXCHAT BOOT NET 06] NO ID - network startup STOPPED");
+    return;
+  }
 
+  console.log("[NEXCHAT BOOT NET 07] configureRelayTransport START");
   configureRelayTransport(identity.id);
+  console.log("[NEXCHAT BOOT NET 07] configureRelayTransport OK");
+
+  /*
+   * Publish the public identity needed for universal user discovery.
+   * This contains no private encryption material.
+   */
+  if (relayTransport) {
+    try {
+      await relayTransport.registerDirectoryUser({
+        id: identity.id,
+        displayName: identity.displayName,
+        username: identity.username,
+        publicKey: identity.publicKey,
+        avatarUri: identity.avatarUri,
+        bio: identity.bio,
+      });
+
+      console.log("[NEXCHAT BOOT NET 07B] directory registration sent");
+    } catch (error) {
+      console.warn(
+        "[NEXCHAT BOOT NET 07B] directory registration failed",
+        error,
+      );
+    }
+  }
+
+  /*
+   * Initialize the application-layer nearby bridge after identity
+   * restoration. The native adapters currently report unavailable,
+   * so this does not claim Bluetooth/Wi-Fi Direct connectivity.
+   */
+  console.log("[NEXCHAT BOOT NET 08] configureNearbyPeerBridge START");
+  configureNearbyPeerBridge(identity.id);
+  console.log("[NEXCHAT BOOT NET 08] configureNearbyPeerBridge OK");
 
   /*
    * Start durable outbound delivery after queue restoration.
    * start() is idempotent, so repeated initialization will
    * not create multiple worker timers.
    */
+  console.log("[NEXCHAT BOOT NET 09] deliveryWorker.start START");
   deliveryWorker.start(identity.id);
+  console.log("[NEXCHAT BOOT NET 09] deliveryWorker.start OK");
+
+  console.log("[NEXCHAT BOOT NET 10] initializeNetworkTransport COMPLETE");
 }
 
 export function useNexChatStore() {
@@ -1152,6 +1518,47 @@ export function useNexChatStore() {
       return conversation;
     },
 
+    registerDirectoryUser: async (): Promise<boolean> => {
+      if (!relayTransport) {
+        return false;
+      }
+
+      const identity = await getIdentity();
+
+      if (!identity?.id || !identity.publicKey) {
+        return false;
+      }
+
+      return relayTransport.registerDirectoryUser({
+        id: identity.id,
+        displayName: identity.displayName,
+        username: identity.username,
+        publicKey: identity.publicKey,
+        avatarUri: identity.avatarUri,
+        bio: identity.bio,
+      });
+    },
+
+    searchDirectoryUsers: async (
+      query: string,
+    ): Promise<DirectoryUser[]> => {
+      if (!relayTransport) {
+        return [];
+      }
+
+      return relayTransport.searchUsers(query);
+    },
+
+    getDirectoryUser: async (
+      identityId: string,
+    ): Promise<DirectoryUser | null> => {
+      if (!relayTransport) {
+        return null;
+      }
+
+      return relayTransport.getUserProfile(identityId);
+    },
+
     sendMessage: async (
       peerId: string,
       text: string,
@@ -1238,29 +1645,85 @@ export function useNexChatStore() {
           ? identity?.publicKey
           : state.contacts.find(
               (contact) =>
-                contact.id === peerId,
+                contact.id.toLowerCase() ===
+                peerId.toLowerCase(),
             )?.publicKey;
 
       if (!recipientPublicKey) {
+        console.warn(
+          "NexChat missing recipient public key",
+          JSON.stringify({
+            peerId,
+            isSelfChat,
+            identityId: identity?.id,
+            identityUsername: identity?.username,
+            contact:
+              state.contacts.find(
+                (contact) =>
+                  contact.id === peerId,
+              ) ?? null,
+            contactCount:
+              state.contacts.length,
+          }),
+        );
+
         throw new Error(
           "This contact does not have a messaging public key. Ask them to share their NexChat QR code again.",
         );
       }
+
+      console.log(
+        "NexChat recipient public key resolved",
+        JSON.stringify({
+          peerId,
+          isSelfChat,
+          recipientPublicKeyLength:
+            recipientPublicKey.length,
+          identityId: identity?.id,
+          contact:
+            state.contacts.find(
+              (contact) =>
+                contact.id === peerId,
+            ) ?? null,
+        }),
+      );
 
       /*
        * Encrypt before exposing the message to the UI.
        * This keeps the optimistic state valid: once "sending"
        * appears, the encrypted envelope is already ready.
        */
-      const encryptedPayload =
-        await encryptMessagePayload(
-          new TextEncoder().encode(
-            JSON.stringify(
-              sendingMessage,
+      let encryptedPayload;
+
+      try {
+        encryptedPayload =
+          await encryptMessagePayload(
+            new TextEncoder().encode(
+              JSON.stringify(
+                sendingMessage,
+              ),
             ),
-          ),
-          recipientPublicKey,
+            recipientPublicKey,
+          );
+
+        console.log(
+          "NexChat message encryption succeeded",
+          JSON.stringify({
+            messageId:
+              sendingMessage.id,
+            encryptedPayloadType:
+              typeof encryptedPayload,
+            encryptedPayloadLength:
+              encryptedPayload?.length ?? null,
+          }),
         );
+      } catch (error) {
+        console.error(
+          "NexChat message encryption failed",
+          error,
+        );
+        throw error;
+      }
 
       const envelope =
         createTransportEnvelope(
@@ -1271,6 +1734,24 @@ export function useNexChatStore() {
         );
 
       envelope.ttl = 7 * 24 * 60 * 60 * 1000;
+
+      console.log(
+        "NexChat transport envelope created",
+        JSON.stringify({
+          messageId:
+            sendingMessage.id,
+          senderId:
+            envelope.senderId,
+          recipientId:
+            envelope.recipientId,
+          payloadType:
+            typeof envelope.payload,
+          payloadLength:
+            typeof envelope.payload === "string"
+              ? String(envelope.payload).length
+              : null,
+        }),
+      );
 
       /*
        * DURABLE OUTBOX
@@ -1416,6 +1897,25 @@ export function useNexChatStore() {
             deliveryState,
             "queued",
           );
+
+        /*
+         * If the normal transport path could not deliver the
+         * encrypted envelope, seed the durable nearby custody
+         * path when direct routing is enabled.
+         *
+         * The same TransportEnvelope is reused. Nearby peers
+         * receive only the encrypted payload and routing metadata.
+         */
+        if (
+          state.settings.allowDirectP2P &&
+          nearbyPeerBridge
+        ) {
+          nearbyPeerBridge.enqueueEnvelope(
+            envelope,
+          );
+
+          void nearbyPeerBridge.flushOutbound();
+        }
       } else {
         deliveryState =
           transition(
@@ -1850,6 +2350,12 @@ export function useNexChatStore() {
       });
     },
 
+    markConversationRead: async (
+      peerId: string
+    ): Promise<void> => {
+      await markConversationRead(peerId);
+    },
+
     setConversation: async (
       peerId: string,
       patch: Partial<Conversation>
@@ -2136,29 +2642,73 @@ export function useNexChatStore() {
       });
     },
 
+    updateContact: async (
+      contactId: string,
+      patch: Partial<NexContact>,
+    ): Promise<NexContact | null> => {
+      let updatedContact: NexContact | null = null;
+
+      const contacts = state.contacts.map((contact) => {
+        if (
+          contact.id.toLowerCase() !==
+          contactId.toLowerCase()
+        ) {
+          return contact;
+        }
+
+        updatedContact = {
+          ...contact,
+          ...patch,
+        };
+
+        return updatedContact;
+      });
+
+      await queuePersist({
+        contacts,
+      });
+
+      return updatedContact;
+    },
+
     addContact: async (
       contact: NexContact
-    ): Promise<void> => {
-      if (
-        state.contacts.some(
-          (existing) =>
-            existing.id === contact.id
-        )
-      ) {
-        return;
-      }
+    ): Promise<NexContact> => {
+      const existing = state.contacts.find(
+        (item) =>
+          item.id.toLowerCase() ===
+          contact.id.toLowerCase(),
+      );
 
       const normalized: NexContact = {
+        ...(existing ?? {}),
         ...contact,
 
         avatar:
           contact.avatar ??
-          contact.avatarUri,
+          contact.avatarUri ??
+          existing?.avatar,
 
         avatarUri:
           contact.avatarUri ??
-          contact.avatar,
+          contact.avatar ??
+          existing?.avatarUri ??
+          existing?.avatar,
       };
+
+      if (existing) {
+        await queuePersist({
+          contacts: state.contacts.map(
+            item =>
+              item.id.toLowerCase() ===
+              contact.id.toLowerCase()
+                ? normalized
+                : item,
+          ),
+        });
+
+        return normalized;
+      }
 
       await queuePersist({
         contacts: [
@@ -2166,6 +2716,8 @@ export function useNexChatStore() {
           ...state.contacts,
         ],
       });
+
+      return normalized;
     },
 
     /**

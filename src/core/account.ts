@@ -1,10 +1,14 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Crypto from "expo-crypto";
 
+export const CURRENT_COMMUNITY_STANDARDS_VERSION = "1.0";
+
 export type StoredAccount = {
   username: string;
   salt: string;
   verifier: string;
+  communityStandardsVersion?: string;
+  communityStandardsAcceptedAt?: string;
 };
 
 export type AccountInfo = {
@@ -75,7 +79,10 @@ export async function hasAccount(): Promise<boolean> {
 
 export async function createAccount(
   username: string,
-  password: string
+  password: string,
+  options?: {
+    communityStandardsAccepted?: boolean;
+  }
 ): Promise<void> {
   const normalized = normalizeUsername(username);
 
@@ -93,6 +100,12 @@ export async function createAccount(
     throw new Error("Password must be at least 8 characters.");
   }
 
+  if (!options?.communityStandardsAccepted) {
+    throw new Error(
+      "You must agree to the NexChat Community Standards before creating your account."
+    );
+  }
+
   if (await hasAccount()) {
     throw new Error("A NexChat account already exists on this device.");
   }
@@ -104,6 +117,10 @@ export async function createAccount(
     username: normalized,
     salt,
     verifier,
+    communityStandardsVersion:
+      CURRENT_COMMUNITY_STANDARDS_VERSION,
+    communityStandardsAcceptedAt:
+      new Date().toISOString(),
   };
 
   await AsyncStorage.setItem(

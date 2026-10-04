@@ -5,11 +5,37 @@ import {
   TransportResult,
 } from "./protocol";
 
+export type DirectoryUser = {
+  id: string;
+  username: string;
+  displayName: string;
+  publicKey: string;
+  avatarUri?: string;
+  bio?: string;
+  updatedAt?: string;
+};
+
 type RelayMessage =
   | {
       type: "register-ack";
       accepted: boolean;
       identityId: string;
+    }
+  | {
+      type: "directory-register-ack";
+      accepted: boolean;
+      user?: DirectoryUser;
+      error?: string;
+    }
+  | {
+      type: "directory-search-result";
+      requestId: string;
+      results: DirectoryUser[];
+    }
+  | {
+      type: "directory-profile-result";
+      requestId: string;
+      user?: DirectoryUser;
     }
   | {
       type: "envelope";
@@ -31,7 +57,10 @@ type RelayMessage =
     }
   | {
       type: "event-ack";
+      eventId?: string;
       accepted: boolean;
+      forwarded?: boolean;
+      error?: string;
     }
   | {
       type: "presence";
@@ -99,6 +128,7 @@ function base64ToBytes(value: string): Uint8Array {
 
 const ACK_TIMEOUT_MS = 8000;
 const REGISTER_TIMEOUT_MS = 5000;
+const DIRECTORY_TIMEOUT_MS = 8000;
 
 export class InternetRelayTransport implements NexTransport {
   readonly kind = "internet-relay" as const;
@@ -128,6 +158,20 @@ export class InternetRelayTransport implements NexTransport {
       resolve: (accepted: boolean) => void;
       timer: ReturnType<typeof setTimeout>;
     }>();
+
+  private readonly pendingDirectoryRequests =
+    new Map<string, {
+      resolve: (
+        result: DirectoryUser[] | DirectoryUser | null,
+      ) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }>();
+
+  private pendingDirectoryRegistration:
+    {
+      resolve: (accepted: boolean) => void;
+      timer: ReturnType<typeof setTimeout>;
+    } | null = null;
 
   constructor(options: InternetRelayTransportOptions) {
     this.relayUrl =
@@ -355,6 +399,203 @@ export class InternetRelayTransport implements NexTransport {
     );
   }
 
+  async registerDirectoryUser(
+    user: DirectoryUser,
+  ): Promise<boolean> {
+    if (!(await this.available())) {
+      return false;
+    }
+
+    const socket = await this.getSocket();
+
+
+    if (
+      !socket ||
+      socket.readyState !== WebSocket.OPEN ||
+      !this.registered
+    ) {
+      return false;
+    }
+
+    if (this.pendingDirectoryRegistration) {
+      clearTimeout(
+        this.pendingDirectoryRegistration.timer,
+      );
+      this.pendingDirectoryRegistration.resolve(false);
+      this.pendingDirectoryRegistration = null;
+    }
+
+    return new Promise<boolean>(
+      (resolve) => {
+        const timer = setTimeout(() => {
+          this.pendingDirectoryRegistration = null;
+          resolve(false);
+        }, DIRECTORY_TIMEOUT_MS);
+
+        this.pendingDirectoryRegistration = {
+          resolve,
+          timer,
+        };
+
+        try {
+
+          socket.send(
+            JSON.stringify({
+              type: "directory-register",
+              user,
+            }),
+          );
+        } catch (error) {
+          clearTimeout(timer);
+          this.pendingDirectoryRegistration = null;
+          resolve(false);
+        }
+      },
+    );
+  }
+
+  async searchUsers(
+    query: string,
+  ): Promise<DirectoryUser[]> {
+    if (!(await this.available())) {
+      return [];
+    }
+
+    const socket = await this.getSocket();
+
+    if (
+      !socket ||
+      socket.readyState !== WebSocket.OPEN ||
+      !this.registered
+    ) {
+      return [];
+    }
+
+    const normalizedQuery = query.trim();
+
+    if (!normalizedQuery) {
+      return [];
+    }
+
+    const requestId =
+      `directory-search-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 10)}`;
+
+    return new Promise<DirectoryUser[]>(
+      (resolve) => {
+        const timer = setTimeout(() => {
+          this.pendingDirectoryRequests.delete(
+            requestId,
+          );
+
+          resolve([]);
+        }, DIRECTORY_TIMEOUT_MS);
+
+        this.pendingDirectoryRequests.set(
+          requestId,
+          {
+            resolve: (
+              result,
+            ) => {
+              resolve(
+                Array.isArray(result)
+                  ? result
+                  : [],
+              );
+            },
+            timer,
+          },
+        );
+
+        try {
+          socket.send(
+            JSON.stringify({
+              type: "directory-search",
+              requestId,
+              query: normalizedQuery,
+            }),
+          );
+        } catch {
+          clearTimeout(timer);
+          this.pendingDirectoryRequests.delete(
+            requestId,
+          );
+          resolve([]);
+        }
+      },
+    );
+  }
+
+  async getUserProfile(
+    identityId: string,
+  ): Promise<DirectoryUser | null> {
+    if (!(await this.available())) {
+      return null;
+    }
+
+    const socket = await this.getSocket();
+
+    if (
+      !socket ||
+      socket.readyState !== WebSocket.OPEN ||
+      !this.registered
+    ) {
+      return null;
+    }
+
+    const requestId =
+      `directory-profile-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 10)}`;
+
+    return new Promise<DirectoryUser | null>(
+      (resolve) => {
+        const timer = setTimeout(() => {
+          this.pendingDirectoryRequests.delete(
+            requestId,
+          );
+
+          resolve(null);
+        }, DIRECTORY_TIMEOUT_MS);
+
+        this.pendingDirectoryRequests.set(
+          requestId,
+          {
+            resolve: (
+              result,
+            ) => {
+              resolve(
+                result &&
+                !Array.isArray(result)
+                  ? result
+                  : null,
+              );
+            },
+            timer,
+          },
+        );
+
+        try {
+          socket.send(
+            JSON.stringify({
+              type: "directory-profile",
+              requestId,
+              identityId:
+                identityId.trim(),
+            }),
+          );
+        } catch {
+          clearTimeout(timer);
+          this.pendingDirectoryRequests.delete(
+            requestId,
+          );
+          resolve(null);
+        }
+      },
+    );
+  }
+
   close(): void {
     this.registered = false;
 
@@ -383,6 +624,23 @@ export class InternetRelayTransport implements NexTransport {
     }
 
     this.pendingEventAcks.clear();
+
+    for (
+      const pending of this.pendingDirectoryRequests.values()
+    ) {
+      clearTimeout(pending.timer);
+      pending.resolve(null);
+    }
+
+    this.pendingDirectoryRequests.clear();
+
+    if (this.pendingDirectoryRegistration) {
+      clearTimeout(
+        this.pendingDirectoryRegistration.timer,
+      );
+      this.pendingDirectoryRegistration.resolve(false);
+      this.pendingDirectoryRegistration = null;
+    }
 
     if (this.socket) {
       this.socket.close();
@@ -537,6 +795,77 @@ export class InternetRelayTransport implements NexTransport {
         message.identityId ===
           this.identityId;
 
+
+      return;
+    }
+
+    if (
+      message.type === "directory-register-ack"
+    ) {
+      const pending =
+        this.pendingDirectoryRegistration;
+
+      if (!pending) {
+        return;
+      }
+
+      clearTimeout(pending.timer);
+      this.pendingDirectoryRegistration = null;
+
+      pending.resolve(
+        message.accepted === true,
+      );
+
+      return;
+    }
+
+    if (
+      message.type === "directory-search-result"
+    ) {
+      const pending =
+        this.pendingDirectoryRequests.get(
+          message.requestId,
+        );
+
+      if (!pending) {
+        return;
+      }
+
+      clearTimeout(pending.timer);
+      this.pendingDirectoryRequests.delete(
+        message.requestId,
+      );
+
+      pending.resolve(
+        Array.isArray(message.results)
+          ? message.results
+          : [],
+      );
+
+      return;
+    }
+
+    if (
+      message.type === "directory-profile-result"
+    ) {
+      const pending =
+        this.pendingDirectoryRequests.get(
+          message.requestId,
+        );
+
+      if (!pending) {
+        return;
+      }
+
+      clearTimeout(pending.timer);
+      this.pendingDirectoryRequests.delete(
+        message.requestId,
+      );
+
+      pending.resolve(
+        message.user || null,
+      );
+
       return;
     }
 
@@ -641,6 +970,37 @@ export class InternetRelayTransport implements NexTransport {
     if (
       message.type === "event-ack"
     ) {
+      const eventId =
+        message.eventId;
+
+      if (!eventId) {
+        return;
+      }
+
+      const pending =
+        this.pendingEventAcks.get(
+          eventId,
+        );
+
+      if (!pending) {
+        return;
+      }
+
+      clearTimeout(
+        pending.timer,
+      );
+
+      this.pendingEventAcks.delete(
+        eventId,
+      );
+
+      pending.resolve(
+        Boolean(
+          message.accepted &&
+          message.forwarded,
+        ),
+      );
+
       return;
     }
   }

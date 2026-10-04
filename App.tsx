@@ -1,4 +1,5 @@
 import React,{useEffect,useMemo,useRef,useState} from "react";
+import {useAudioPlayer,setAudioModeAsync} from "expo-audio";
 import {SafeAreaProvider,useSafeAreaInsets} from "react-native-safe-area-context";
 import {Alert,AppState,FlatList,Image,ImageBackground,KeyboardAvoidingView,Modal,Platform,ScrollView,Share,StatusBar,StyleSheet,Switch,Text,TextInput,TouchableOpacity,View} from "react-native";
 import * as Clipboard from "expo-clipboard";
@@ -11,6 +12,7 @@ import * as LocalAuthentication from "expo-local-authentication";
 import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
+import * as Notifications from "expo-notifications";
 import {initIdentity,getIdentity,Identity,updateIdentity} from "./src/core/identity";
 import {
   createAccount,
@@ -42,14 +44,25 @@ import {
   sendTypingEvent,
   sendCallSignal,
   subscribeCallSignals,
+  subscribeIncomingMessages,
 } from "./src/core/store";
 import {CallSignal} from "./src/core/callSignaling";
-import {FeedScreen} from "./src/components/FeedScreen";
-import {getFeedFollowCounts} from "./src/core/feed";
+import {FeedScreen,getCreator} from "./src/components/FeedScreen";
+import MyPostViewer from "./src/components/MyPostViewer";
+import {FeedPost,getFeedFollowCounts,loadFeedPosts,loadHiddenFeedPostIds,setFeedPostHidden} from "./src/core/feed";
 import {PasscodeManager} from "./src/components/PasscodeManager";
 
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
 type Tab="Chats"|"Stories"|"Feed"|"Calls"|"Settings";
-type Screen={name:"home"}|{name:"chat";peerId:string}|{name:"new"}|{name:"contact";peerId:string}|{name:"settings"}|{name:"settingsSection";section:string};
+type Screen={name:"home"}|{name:"chat";peerId:string}|{name:"new"}|{name:"contact";peerId:string}|{name:"settings"}|{name:"settingsSection";section:string}|{name:"myPosts"};
 const icon=(x:string)=><Text style={{fontSize:19}}>{x}</Text>;
 
 function Button({label,onPress,secondary=false,danger=false,theme}:{label:string;onPress:()=>void;secondary?:boolean;danger?:boolean;theme?:any}){
@@ -147,6 +160,115 @@ function NewMessage({
   const [media, setMedia] = useState<Attachment[]>([]);
   const [mode, setMode] = useState<"normal" | "viewOnce">("normal");
   const [scannerVisible, setScannerVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<
+    Array<{
+      id: string;
+      displayName: string;
+      username?: string;
+      publicKey: string;
+      avatarUri?: string;
+      bio?: string;
+    }>
+  >([]);
+  const [searching, setSearching] = useState(false);
+
+  const searchDirectory = async () => {
+    const query = searchQuery.trim();
+
+    if (query.length < 2) {
+      Alert.alert(
+        "Search too short",
+        "Enter at least 2 characters to search for a NexChat user."
+      );
+      return;
+    }
+
+    setSearching(true);
+
+    try {
+      const identity = await getIdentity();
+
+      const results = await st.searchDirectoryUsers(query);
+
+      const filtered = results.filter(
+        (user) =>
+          user.id.toLowerCase() !== identity.id.toLowerCase()
+      );
+
+      setSearchResults(filtered);
+    } catch (error) {
+      console.warn("NexChat directory search failed", error);
+      setSearchResults([]);
+
+      Alert.alert(
+        "Search unavailable",
+        "User discovery is currently unavailable. You can still use QR codes or a saved contact."
+      );
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const selectDirectoryUser = async (user: {
+    id: string;
+    displayName: string;
+    username?: string;
+    publicKey: string;
+    avatarUri?: string;
+    bio?: string;
+  }) => {
+    const identity = await getIdentity();
+
+    if (user.id.toLowerCase() === identity.id.toLowerCase()) {
+      return;
+    }
+
+    try {
+      const latest = await st.getDirectoryUser(user.id);
+      const contact = latest ?? user;
+
+      const existing = st.contacts.find(
+        (c) =>
+          c.id.toLowerCase() ===
+          contact.id.toLowerCase()
+      );
+
+      if (!existing) {
+        await st.addContact({
+          id: contact.id,
+          displayName: contact.displayName,
+          username: contact.username,
+          publicKey: contact.publicKey,
+          avatarUri: contact.avatarUri,
+          bio: contact.bio,
+          online: false,
+        });
+      } else {
+        await st.updateContact(contact.id, {
+          displayName: contact.displayName,
+          username: contact.username,
+          publicKey: contact.publicKey,
+          avatarUri: contact.avatarUri,
+          bio: contact.bio,
+        });
+      }
+
+      setId(contact.id);
+      setSearchResults([]);
+      setSearchQuery("");
+    } catch (error) {
+      console.warn(
+        "Failed to save directory contact",
+        error
+      );
+
+      Alert.alert(
+        "Could not add user",
+        "The user was found, but their public identity could not be saved."
+      );
+    }
+  };
 
   const addScannedContact = async (contact: {
     id: string;
@@ -155,7 +277,9 @@ function NewMessage({
     publicKey: string;
     avatarUri?: string;
   }) => {
-    if (contact.id === (await getIdentity()).id) {
+    const identity = await getIdentity();
+
+    if (contact.id === identity.id) {
       Alert.alert(
         "That's your own QR code",
         "You cannot start a conversation with yourself."
@@ -164,11 +288,15 @@ function NewMessage({
     }
 
     const existing = st.contacts.find(
-      (c) => c.id.toLowerCase() === contact.id.toLowerCase()
+      (c) =>
+        c.id.toLowerCase() ===
+        contact.id.toLowerCase()
     );
 
+    let storedContact: NexContact | null;
+
     if (!existing) {
-      await st.addContact({
+      storedContact = await st.addContact({
         id: contact.id,
         displayName: contact.displayName,
         username: contact.username,
@@ -176,7 +304,40 @@ function NewMessage({
         avatarUri: contact.avatarUri,
         online: false,
       });
+    } else {
+      storedContact = await st.updateContact(
+        contact.id,
+        {
+          displayName: contact.displayName,
+          username: contact.username,
+          publicKey: contact.publicKey,
+          avatarUri: contact.avatarUri,
+        },
+      );
     }
+
+    console.log(
+      "NexChat QR contact stored",
+      JSON.stringify({
+        id: contact.id,
+        username: contact.username,
+        publicKeyLength:
+          contact.publicKey.length,
+        stored:
+          storedContact ?? null,
+        storedPublicKeyLength:
+          storedContact?.publicKey?.length ?? 0,
+      }),
+    );
+
+    if (!storedContact?.publicKey) {
+      Alert.alert(
+        "Contact could not be saved",
+        "The QR code was read, but the contact key was not stored. Please try scanning again."
+      );
+      return;
+    }
+
 
     setId(contact.id);
 
@@ -255,6 +416,126 @@ function NewMessage({
           label="▣  Scan NexChat QR"
           onPress={() => setScannerVisible(true)}
         />
+
+        <Text
+          style={[
+            s.label,
+            { color: theme.ink },
+          ]}
+        >
+          Find a NexChat user
+        </Text>
+
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <TextInput
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholder="Username, name or NexChat ID"
+            placeholderTextColor={theme.muted}
+            style={[
+              s.input,
+              {
+                flex: 1,
+                color: theme.ink,
+                borderColor: theme.line,
+                backgroundColor: theme.card,
+              },
+            ]}
+          />
+
+          <Button
+            label={searching ? "Searching..." : "Search"}
+            onPress={() => {
+              if (!searching) {
+                void searchDirectory();
+              }
+            }}
+          />
+        </View>
+
+        {searchResults.length > 0 && (
+          <View style={{ gap: 8 }}>
+            {searchResults.map((user) => (
+              <TouchableOpacity
+                key={user.id}
+                onPress={() => {
+                  void selectDirectoryUser(user);
+                }}
+                style={{
+                  padding: 14,
+                  borderWidth: 1,
+                  borderColor: theme.line,
+                  borderRadius: 14,
+                  backgroundColor: theme.card,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 16,
+                    fontWeight: "800",
+                    color: theme.ink,
+                  }}
+                >
+                  {user.displayName}
+                </Text>
+
+                {!!user.username && (
+                  <Text
+                    style={{
+                      marginTop: 2,
+                      color: theme.muted,
+                    }}
+                  >
+                    @{user.username}
+                  </Text>
+                )}
+
+                <Text
+                  style={{
+                    marginTop: 4,
+                    fontSize: 11,
+                    color: theme.muted,
+                  }}
+                >
+                  {user.id}
+                </Text>
+
+                {!!user.bio && (
+                  <Text
+                    numberOfLines={2}
+                    style={{
+                      marginTop: 6,
+                      color: theme.ink,
+                    }}
+                  >
+                    {user.bio}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
+        {!searching &&
+          searchQuery.trim().length >= 2 &&
+          searchResults.length === 0 && (
+            <Text
+              style={{
+                color: theme.muted,
+                fontSize: 12,
+              }}
+            >
+              No NexChat users found.
+            </Text>
+          )}
 
         <Text
           style={[
@@ -587,8 +868,9 @@ function MessageBubble({
             <Text style={{color:theme.muted,fontSize:12}}>
               {m.callInfo.status==="completed"
                 ? (m.callInfo.durationSeconds!=null?formatCallDuration(m.callInfo.durationSeconds):"Completed")
-                : m.callInfo.status==="failed"?"Not connected"
+                : m.callInfo.status==="failed"?"Failed"
                 : m.callInfo.status==="missed"?"Missed"
+                : m.callInfo.status==="cancelled"?"Cancelled"
                 : "Declined"}
               {" • "}
               {new Date(m.createdAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}
@@ -706,6 +988,10 @@ function Chat({
       }
     };
   }, [peerId]);
+
+  useEffect(() => {
+    void st.markConversationRead(peerId);
+  }, [peerId, st.markConversationRead]);
 
   /*
    * A per-chat theme override was already being saved by the
@@ -1222,18 +1508,447 @@ function Settings({theme,onSection,onBack}:{theme:any;onSection:(s:string)=>void
           />
         </View>
 
+        <View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line,marginBottom:12}]}>
+          <Row
+            icon="∕"
+            title="Community Standards"
+            subtitle="How we keep NexChat respectful, private and safe"
+            onPress={()=>onSection("communityStandards")}
+            theme={theme}
+          />
+        </View>
+
       </ScrollView>
     </View>
   );
 }
 
-function SettingSection({section,theme,onBack}:{section:string;theme:any;onBack:()=>void}){const st=useNexChatStore();const [id,setId]=useState<Identity|null>(null);const [name,setName]=useState("");const [username,setUsername]=useState("");
+function MyPostsScreen({
+  theme,
+  identity,
+  onBack,
+}: {
+  theme: any;
+  identity: Identity | null;
+  onBack: () => void;
+}) {
+  const [posts, setPosts] = useState<FeedPost[]>([]);
+  const [mainTab, setMainTab] = useState<
+    "my" | "liked" | "reshared" | "hidden" | "others"
+  >("my");
+  const [mediaTab, setMediaTab] = useState<
+    "videos" | "images" | "docs"
+  >("videos");
+  const [selectedPost, setSelectedPost] = useState<FeedPost | null>(
+    null,
+  );
+  const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(
+    new Set(),
+  );
+
+  useEffect(() => {
+    let active = true;
+
+    void loadFeedPosts().then(setPosts);
+
+    void loadHiddenFeedPostIds().then((ids) => {
+      if (active) {
+        setHiddenPostIds(new Set(ids));
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (!identity) {
+    return (
+      <View style={s.flex}>
+        <Header title="My Posts" onBack={onBack} theme={theme} />
+      </View>
+    );
+  }
+
+  const ownPosts = posts.filter(
+    post => post.creator.id === identity.id,
+  );
+
+  const videos = ownPosts.filter(post =>
+    post.attachment?.kind === "video" ||
+    post.attachments?.some(a => a.kind === "video") ||
+    post.attachment?.mimeType?.startsWith("video/") ||
+    post.attachments?.some(a => a.mimeType?.startsWith("video/"))
+  );
+
+  const images = ownPosts.filter(post =>
+    post.attachment?.kind === "image" ||
+    post.attachments?.some(a => a.kind === "image") ||
+    post.attachment?.mimeType?.startsWith("image/") ||
+    post.attachments?.some(a => a.mimeType?.startsWith("image/"))
+  );
+
+  const docs = ownPosts.filter(post =>
+    post.attachment?.kind === "file" ||
+    post.attachments?.some(a => a.kind === "file")
+  );
+
+  let currentPosts: FeedPost[] = [];
+
+  if (mainTab === "my") {
+    currentPosts =
+      mediaTab === "videos"
+        ? videos
+        : mediaTab === "images"
+          ? images
+          : docs;
+  }
+
+  if (mainTab === "liked") {
+    currentPosts = posts.filter(post =>
+      post.likedBy?.includes(identity.id),
+    );
+  }
+
+  if (mainTab === "reshared") {
+    currentPosts = posts.filter(post =>
+      post.resharedBy?.includes(identity.id),
+    );
+  }
+
+  if (mainTab === "hidden") {
+    currentPosts = posts.filter(post =>
+      hiddenPostIds.has(post.id),
+    );
+  }
+
+  if (mainTab === "others") {
+    currentPosts = ownPosts.filter(
+      post => (post.resharedBy?.length ?? 0) > 0,
+    );
+  }
+
+  const mainTabs = [
+    ["my", "My Posts"],
+    ["liked", "Liked"],
+    ["reshared", "Reshared"],
+    ["hidden", "Hidden"],
+    ["others", "Reshared by Others"],
+  ] as const;
+
+  if (selectedPost) {
+    return (
+      <MyPostViewer
+        post={selectedPost}
+        theme={theme}
+        userId={identity.id}
+        creator={getCreator(identity)}
+        onClose={() => setSelectedPost(null)}
+        onPostUpdated={updated => {
+          setPosts(current =>
+            current.map(post =>
+              post.id === updated.id ? updated : post,
+            ),
+          );
+          setSelectedPost(updated);
+        }}
+        isHidden={hiddenPostIds.has(selectedPost.id)}
+        onPostUnhidden={postId => {
+          setHiddenPostIds(current => {
+            const next = new Set(current);
+            next.delete(postId);
+            return next;
+          });
+          setSelectedPost(null);
+        }}
+      />
+    );
+  }
+
+  return (
+    <View style={s.flex}>
+      <Header
+        title="My Posts"
+        subtitle={`${ownPosts.length} posts`}
+        onBack={onBack}
+        theme={theme}
+      />
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{
+          paddingHorizontal: 8,
+          gap: 4,
+          alignItems: "center",
+        }}
+        style={{
+          flexGrow: 0,
+          borderBottomWidth: 1,
+          borderBottomColor: theme.line,
+        }}
+      >
+        {mainTabs.map(([key, label]) => (
+          <TouchableOpacity
+            key={key}
+            onPress={() => setMainTab(key)}
+            style={{
+              paddingHorizontal: 10,
+              paddingVertical: 12,
+              borderBottomWidth: mainTab === key ? 2 : 0,
+              borderBottomColor: theme.brand,
+            }}
+          >
+            <Text
+              style={{
+                color:
+                  mainTab === key
+                    ? theme.brand
+                    : theme.muted,
+                fontSize: 12,
+                fontWeight: "800",
+              }}
+            >
+              {label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+
+      {mainTab === "my" && (
+        <View
+          style={{
+            flexDirection: "row",
+            borderBottomWidth: 1,
+            borderBottomColor: theme.line,
+          }}
+        >
+          {[
+            ["videos", "Videos"],
+            ["images", "Images"],
+            ["docs", "Docs"],
+          ].map(([key, label]) => (
+            <TouchableOpacity
+              key={key}
+              onPress={() =>
+                setMediaTab(
+                  key as "videos" | "images" | "docs",
+                )
+              }
+              style={{
+                flex: 1,
+                alignItems: "center",
+                paddingVertical: 10,
+                borderBottomWidth:
+                  mediaTab === key ? 2 : 0,
+                borderBottomColor: theme.brand,
+              }}
+            >
+              <Text
+                style={{
+                  color:
+                    mediaTab === key
+                      ? theme.brand
+                      : theme.muted,
+                  fontSize: 12,
+                  fontWeight: "800",
+                }}
+              >
+                {label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+
+      <ScrollView
+        contentContainerStyle={{
+          padding: 2,
+          paddingBottom: 40,
+        }}
+      >
+        {currentPosts.length === 0 ? (
+          <View
+            style={{
+              alignItems: "center",
+              paddingTop: 60,
+            }}
+          >
+            <Text style={{ fontSize: 38 }}>▦</Text>
+
+            <Text
+              style={{
+                color: theme.muted,
+                marginTop: 10,
+                fontWeight: "700",
+              }}
+            >
+              Nothing here yet
+            </Text>
+          </View>
+        ) : (
+          <View
+            style={{
+              flexDirection: "row",
+              flexWrap: "wrap",
+            }}
+          >
+            {currentPosts.map(post => {
+              const attachment =
+                post.attachments?.[0] ?? post.attachment;
+
+              const isVideo =
+                attachment?.kind === "video" ||
+                attachment?.mimeType?.startsWith("video/");
+
+              const isImage =
+                attachment?.kind === "image" ||
+                attachment?.mimeType?.startsWith("image/");
+
+              return (
+                <TouchableOpacity
+                  key={post.id}
+                  activeOpacity={0.9}
+                  onPress={() => setSelectedPost(post)}
+                  style={{
+                    width: "33.3333%",
+                    aspectRatio: 1,
+                    padding: 2,
+                  }}
+                >
+                  <View
+                    style={{
+                      flex: 1,
+                      backgroundColor: theme.card,
+                      borderRadius: 3,
+                      overflow: "hidden",
+                    }}
+                  >
+                    {attachment && (isImage || isVideo) ? (
+                      <View style={{ flex: 1 }}>
+                        <Image
+                          source={{ uri: attachment.uri }}
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                          }}
+                          resizeMode="cover"
+                        />
+
+                        {isVideo && (
+                          <View
+                            style={{
+                              position: "absolute",
+                              top: 0,
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              alignItems: "center",
+                              justifyContent: "center",
+                              backgroundColor: "rgba(0,0,0,0.15)",
+                            }}
+                          >
+                            <View
+                              style={{
+                                width: 42,
+                                height: 42,
+                                borderRadius: 21,
+                                alignItems: "center",
+                                justifyContent: "center",
+                                backgroundColor: "rgba(0,0,0,0.55)",
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  color: "#fff",
+                                  fontSize: 18,
+                                  marginLeft: 2,
+                                }}
+                              >
+                                ▶
+                              </Text>
+                            </View>
+                          </View>
+                        )}
+                      </View>
+                    ) : (
+                      <View
+                        style={{
+                          flex: 1,
+                          alignItems: "center",
+                          justifyContent: "center",
+                          padding: 8,
+                        }}
+                      >
+                        <Text style={{ fontSize: 28 }}>
+                          {mainTab === "liked"
+                            ? "♥"
+                            : mainTab === "reshared"
+                              ? "🔁"
+                              : mainTab === "hidden"
+                                ? "🙈"
+                                : mainTab === "others"
+                                  ? "↪"
+                                  : "📄"}
+                        </Text>
+
+                        {post.text ? (
+                          <Text
+                            numberOfLines={2}
+                            style={{
+                              color: theme.ink,
+                              fontSize: 10,
+                              textAlign: "center",
+                              marginTop: 4,
+                            }}
+                          >
+                            {post.text}
+                          </Text>
+                        ) : null}
+                      </View>
+                    )}
+
+                    {post.creator.id === identity.id && (
+                      <View
+                        style={{
+                          position: "absolute",
+                          left: 6,
+                          bottom: 5,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color: "#fff",
+                            fontSize: 10,
+                            fontWeight: "800",
+                            textShadowColor: "#000",
+                            textShadowRadius: 3,
+                          }}
+                        >
+                          👁 {post.viewCount ?? 0}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+function SettingSection({section,theme,onBack,onOpenMyPosts}:{section:string;theme:any;onBack:()=>void;onOpenMyPosts:()=>void}){const st=useNexChatStore();const [id,setId]=useState<Identity|null>(null);const [name,setName]=useState("");const [username,setUsername]=useState("");
 const [bio,setBio]=useState("");
 const [website,setWebsite]=useState("");
 const [location,setLocation]=useState("");
 const [pronouns,setPronouns]=useState("");
 const [followersCount,setFollowersCount]=useState(0);
-const [followingCount,setFollowingCount]=useState(0);
+const [followingCount,setFollowingCount]=useState(0);const [myPosts,setMyPosts]=useState<FeedPost[]>([]);
+const [likedPosts,setLikedPosts]=useState<FeedPost[]>([]);
+const [resharedPosts,setResharedPosts]=useState<FeedPost[]>([]);
 
 const [chatSettingsTab,setChatSettingsTab]=useState<"colors"|"background">("colors");useEffect(() => {
   getIdentity().then(async x => {
@@ -1248,6 +1963,20 @@ const [chatSettingsTab,setChatSettingsTab]=useState<"colors"|"background">("colo
     const counts = await getFeedFollowCounts(x.id);
     setFollowersCount(counts.followers);
     setFollowingCount(counts.following);
+
+    const posts = await loadFeedPosts();
+
+    setMyPosts(
+      posts.filter(post => post.creator.id === x.id),
+    );
+
+    setLikedPosts(
+      posts.filter(post => post.likedBy?.includes(x.id)),
+    );
+
+    setResharedPosts(
+      posts.filter(post => post.resharedBy?.includes(x.id)),
+    );
   });
 }, []);
 
@@ -1264,8 +1993,186 @@ const saveProfile = async () => {
   const updated = await getIdentity();
   setId(updated);
 
+  /*
+   * Refresh the public discovery profile when the user changes
+   * their name, username, bio, website, location, or pronouns.
+   * Private messaging keys are never published here.
+   */
+  try {
+    await st.registerDirectoryUser();
+  } catch (error) {
+    console.warn(
+      "Directory profile refresh failed",
+      error,
+    );
+  }
+
   Alert.alert("Saved", "Profile updated locally.");
-};if(section==="profile") {
+};
+if(section==="communityStandards") {
+  const standards = [
+    {
+      title: "Respect people",
+      text: "Do not use NexChat to bully, harass, threaten, stalk, humiliate, or target another person.",
+    },
+    {
+      title: "No hate or discrimination",
+      text: "Do not attack or degrade people because of characteristics such as race, ethnicity, nationality, religion, gender, disability, or sexual orientation.",
+    },
+    {
+      title: "Protect young people",
+      text: "NexChat does not allow grooming, sexual exploitation of minors, sextortion, sexual solicitation of minors, or other exploitation of young people.",
+    },
+    {
+      title: "No violence or criminal harm",
+      text: "Do not threaten violence, encourage serious harm, or use NexChat to facilitate serious criminal activity.",
+    },
+    {
+      title: "Protect privacy",
+      text: "Do not expose private phone numbers, addresses, passwords, credentials, identity documents, financial information, or private conversations without appropriate authorization.",
+    },
+    {
+      title: "No scams or fraud",
+      text: "Do not use NexChat for phishing, fraudulent giveaways, impersonation scams, malicious links, payment scams, or deliberately deceptive schemes.",
+    },
+    {
+      title: "Be authentic",
+      text: "Do not impersonate people, fabricate evidence to harm others, manipulate engagement, or deliberately deceive people with altered or AI-generated media.",
+    },
+    {
+      title: "No dangerous challenges",
+      text: "Do not encourage challenges, stunts, or activities that are likely to cause serious injury to yourself or someone else.",
+    },
+    {
+      title: "Respect intellectual property",
+      text: "Do not use NexChat to deliberately distribute content that you do not have the right to share.",
+    },
+    {
+      title: "Keep NexChat secure",
+      text: "Do not distribute malware, steal credentials, compromise accounts, attack NexChat infrastructure, or deliberately abuse security vulnerabilities.",
+    },
+  ];
+
+  return (
+    <View style={s.flex}>
+      <Header
+        title="Community Standards"
+        subtitle="Respectful, private and safe"
+        onBack={onBack}
+        theme={theme}
+      />
+
+      <ScrollView
+        contentContainerStyle={{
+          padding: 12,
+          paddingBottom: 48,
+        }}
+      >
+        <View
+          style={[
+            s.section,
+            {
+              backgroundColor: theme.card,
+              borderColor: theme.line,
+              alignItems: "center",
+              paddingVertical: 24,
+            },
+          ]}
+        >
+          <Text
+            style={{
+              color: theme.brand,
+              fontSize: 42,
+              fontWeight: "900",
+              lineHeight: 48,
+            }}
+          >
+            ∕
+          </Text>
+
+          <Text
+            style={{
+              color: theme.ink,
+              fontSize: 22,
+              fontWeight: "900",
+              marginTop: 8,
+            }}
+          >
+            NexChat Community Standards
+          </Text>
+
+          <Text
+            style={{
+              color: theme.muted,
+              textAlign: "center",
+              marginTop: 8,
+              lineHeight: 20,
+            }}
+          >
+            These standards apply to profiles, posts, videos, comments,
+            communities and other interactions on NexChat.
+          </Text>
+        </View>
+
+        {standards.map((item, index) => (
+          <View
+            key={item.title}
+            style={[
+              s.section,
+              {
+                backgroundColor: theme.card,
+                borderColor: theme.line,
+                marginTop: index === 0 ? 0 : 10,
+              },
+            ]}
+          >
+            <Text
+              style={{
+                color: theme.ink,
+                fontSize: 16,
+                fontWeight: "900",
+                marginBottom: 7,
+              }}
+            >
+              {index + 1}. {item.title}
+            </Text>
+
+            <Text
+              style={{
+                color: theme.muted,
+                lineHeight: 21,
+              }}
+            >
+              {item.text}
+            </Text>
+          </View>
+        ))}
+
+        <View
+          style={{
+            paddingHorizontal: 4,
+            paddingTop: 18,
+          }}
+        >
+          <Text
+            style={{
+              color: theme.muted,
+              fontSize: 12,
+              lineHeight: 18,
+              textAlign: "center",
+            }}
+          >
+            NexChat may review reports and take action when content or
+            behavior violates these standards. Enforcement should be
+            proportionate to the violation and users should have a way to
+            appeal significant enforcement actions.
+          </Text>
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+if(section==="profile") {
   const profilePhoto = async () => {
     try {
       const uri = await pickProfilePhoto();
@@ -1279,6 +2186,18 @@ const saveProfile = async () => {
       });
 
       setId(await getIdentity());
+
+      /*
+       * Keep universal discovery in sync with the new avatar.
+       */
+      try {
+        await st.registerDirectoryUser();
+      } catch (error) {
+        console.warn(
+          "Directory avatar refresh failed",
+          error,
+        );
+      }
 
       Alert.alert(
         "Profile picture updated",
@@ -1300,6 +2219,18 @@ const saveProfile = async () => {
     });
 
     setId(await getIdentity());
+
+    /*
+     * Keep universal discovery in sync after removing the avatar.
+     */
+    try {
+      await st.registerDirectoryUser();
+    } catch (error) {
+      console.warn(
+        "Directory avatar removal refresh failed",
+        error,
+      );
+    }
 
     Alert.alert(
       "Profile picture removed",
@@ -1387,6 +2318,83 @@ const saveProfile = async () => {
               />
             )}
           </View>
+        </View>
+
+        <View
+          style={[
+            {
+              flexDirection: "row",
+              borderWidth: 1,
+              borderRadius: 12,
+              borderColor: theme.line,
+              backgroundColor: theme.card,
+              overflow: "hidden",
+              marginBottom: 12,
+            },
+          ]}
+        >
+          <View
+            style={{
+              flex: 1,
+              alignItems: "center",
+              paddingVertical: 14,
+              borderRightWidth: 1,
+              borderRightColor: theme.line,
+            }}
+          >
+            <Text
+              style={{
+                color: theme.ink,
+                fontSize: 20,
+                fontWeight: "900",
+              }}
+            >
+              {followersCount}
+            </Text>
+            <Text style={{ color: theme.muted, marginTop: 3 }}>
+              Followers
+            </Text>
+          </View>
+
+          <View
+            style={{
+              flex: 1,
+              alignItems: "center",
+              paddingVertical: 14,
+            }}
+          >
+            <Text
+              style={{
+                color: theme.ink,
+                fontSize: 20,
+                fontWeight: "900",
+              }}
+            >
+              {followingCount}
+            </Text>
+            <Text style={{ color: theme.muted, marginTop: 3 }}>
+              Following
+            </Text>
+          </View>
+        </View>
+
+        <View
+          style={[
+            s.section,
+            {
+              backgroundColor: theme.card,
+              borderColor: theme.line,
+              marginTop: 18,
+            },
+          ]}
+        >
+          <Row
+            icon="▦"
+            title="My Posts"
+            subtitle="Videos, images, documents, liked and reshared posts"
+            onPress={onOpenMyPosts}
+            theme={theme}
+          />
         </View>
 
         <Text
@@ -1720,64 +2728,6 @@ const saveProfile = async () => {
         >
           Audience
         </Text>
-
-        <View
-          style={[
-            {
-              flexDirection: "row",
-              borderWidth: 1,
-              borderRadius: 12,
-              borderColor: theme.line,
-              backgroundColor: theme.card,
-              overflow: "hidden",
-              marginBottom: 12,
-            },
-          ]}
-        >
-          <View
-            style={{
-              flex: 1,
-              alignItems: "center",
-              paddingVertical: 14,
-              borderRightWidth: 1,
-              borderRightColor: theme.line,
-            }}
-          >
-            <Text
-              style={{
-                color: theme.ink,
-                fontSize: 20,
-                fontWeight: "900",
-              }}
-            >
-              {followersCount}
-            </Text>
-            <Text style={{ color: theme.muted, marginTop: 3 }}>
-              Followers
-            </Text>
-          </View>
-
-          <View
-            style={{
-              flex: 1,
-              alignItems: "center",
-              paddingVertical: 14,
-            }}
-          >
-            <Text
-              style={{
-                color: theme.ink,
-                fontSize: 20,
-                fontWeight: "900",
-              }}
-            >
-              {followingCount}
-            </Text>
-            <Text style={{ color: theme.muted, marginTop: 3 }}>
-              Following
-            </Text>
-          </View>
-        </View>
 
         <Text
           style={[
@@ -2536,8 +3486,23 @@ function Calls({theme,onStartCall}:{theme:any;onStartCall:(peerId:string,video:b
       <FlatList data={history} keyExtractor={h=>h.id} contentContainerStyle={{padding:12,paddingBottom:100}}
         renderItem={({item})=>{
           const c=st.contacts.find(x=>x.id===item.peerId);
-          const label=item.status==="completed"?(item.durationSeconds!=null?formatCallDuration(item.durationSeconds):"Completed"):item.status==="failed"?"Not connected":item.status==="missed"?"Missed":"Declined";
-          const labelColor=item.status==="completed"?theme.muted:theme.danger;
+          const label =
+            item.status==="completed"
+              ? (item.durationSeconds!=null
+                  ? formatCallDuration(item.durationSeconds)
+                  : "Completed")
+              : item.status==="failed"
+                ? "Failed"
+                : item.status==="missed"
+                  ? "Missed"
+                  : item.status==="cancelled"
+                    ? "Cancelled"
+                    : "Declined";
+          const labelColor =
+            item.status==="completed" ||
+            item.status==="cancelled"
+              ? theme.muted
+              : theme.danger;
           return <TouchableOpacity onPress={()=>onStartCall(item.peerId,item.type==="video")} style={[s.chatRow,{backgroundColor:theme.card,borderColor:theme.line}]}>
             <View style={[s.avatar,{backgroundColor:theme.brand}]}>
               <Text style={{color:"white",fontWeight:"900"}}>{(c?.displayName||item.peerId).slice(0,1).toUpperCase()}</Text>
@@ -2557,9 +3522,9 @@ function Calls({theme,onStartCall}:{theme:any;onStartCall:(peerId:string,video:b
     </TouchableOpacity>
     <Modal visible={searchVisible} animationType="slide" onRequestClose={()=>setSearchVisible(false)}>
       <View style={[s.flex,{backgroundColor:theme.bg}]}>
-        <Header title="New call" subtitle="Search contacts" onBack={()=>setSearchVisible(false)} theme={theme}/>
+        <Header title="New call" subtitle="Choose a contact" onBack={()=>setSearchVisible(false)} theme={theme}/>
         <View style={{padding:12}}>
-          <TextInput value={query} onChangeText={setQuery} placeholder="Search by name, username or ID" placeholderTextColor={theme.muted} style={[s.messageInput,{color:theme.ink,borderColor:theme.line,backgroundColor:theme.card}]}/>
+          <TextInput value={query} onChangeText={setQuery} placeholder="Search contacts" placeholderTextColor={theme.muted} style={[s.messageInput,{color:theme.ink,borderColor:theme.line,backgroundColor:theme.card}]}/>
         </View>
         <FlatList data={filtered} keyExtractor={c=>c.id} contentContainerStyle={{padding:12,paddingBottom:40}}
           ListEmptyComponent={<View style={s.empty}><Text style={{color:theme.muted}}>No contacts match your search.</Text></View>}
@@ -2570,7 +3535,7 @@ function Calls({theme,onStartCall}:{theme:any;onStartCall:(peerId:string,video:b
               </View>
               <View style={{flex:1}}>
                 <Text style={[s.chatName,{color:theme.ink}]}>{item.displayName||item.id}</Text>
-                <Text style={{color:theme.muted,fontSize:12}}>{item.username?`@${item.username}`:item.id}</Text>
+                <Text style={{color:theme.muted,fontSize:12}}>NexChat contact</Text>
               </View>
               <TouchableOpacity onPress={()=>{setSearchVisible(false);setQuery("");onStartCall(item.id,false)}} style={{padding:8}}>
                 <Text style={{fontSize:22}}>📞</Text>
@@ -2601,7 +3566,7 @@ function CallOverlay({
   status:
     | "calling"
     | "ringing"
-    | "accepted";
+    | "connecting";
   incoming: boolean;
   onAccept?: () => void;
   onDecline?: () => void;
@@ -2611,23 +3576,71 @@ function CallOverlay({
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
-    if (status !== "accepted") {
-      setElapsed(0);
-      return;
+    setElapsed(0);
+  }, [status]);
+
+  const ringtonePlayer = useAudioPlayer(
+    require("./assets/audio/nexchat-ringtone.wav"),
+  );
+
+  useEffect(() => {
+    ringtonePlayer.loop = true;
+    ringtonePlayer.volume = 0.65;
+
+    const shouldRing =
+      status === "calling" ||
+      status === "ringing";
+
+    let cancelled = false;
+
+    const stopRingtone = () => {
+      try {
+        Promise.resolve(ringtonePlayer.pause()).catch(() => {});
+      } catch {}
+
+      try {
+        Promise.resolve(ringtonePlayer.seekTo(0)).catch(() => {});
+      } catch {}
+    };
+
+    // Every non-ringing state must be silent immediately.
+    if (!shouldRing) {
+      stopRingtone();
+
+      return () => {
+        cancelled = true;
+        stopRingtone();
+      };
     }
 
-    const started = Date.now();
+    const configureAndPlay = async () => {
+      try {
+        await setAudioModeAsync({
+          playsInSilentMode: true,
+        });
 
-    const interval = setInterval(() => {
-      setElapsed(
-        Math.floor(
-          (Date.now() - started) / 1000,
-        ),
-      );
-    }, 1000);
+        if (cancelled) return;
 
-    return () => clearInterval(interval);
-  }, [status]);
+        try {
+          Promise.resolve(ringtonePlayer.play()).catch(() => {});
+        } catch {}
+      } catch (error) {
+        if (!cancelled) {
+          console.warn(
+            "Call ringtone initialization failed:",
+            error,
+          );
+        }
+      }
+    };
+
+    void configureAndPlay();
+
+    return () => {
+      cancelled = true;
+      stopRingtone();
+    };
+  }, [status, ringtonePlayer]);
 
   const statusLabel =
     incoming && status === "ringing"
@@ -2636,7 +3649,7 @@ function CallOverlay({
         ? "Calling…"
         : status === "ringing"
           ? "Ringing…"
-          : "Accepted — media unavailable";
+          : "Connecting…";
 
   return (
     <Modal
@@ -2680,8 +3693,7 @@ function CallOverlay({
               {color: theme.ink},
             ]}
           >
-            {contact?.displayName ||
-              "NexChat contact"}
+            "Exile"
           </Text>
 
           <Text
@@ -2705,15 +3717,15 @@ function CallOverlay({
             {statusLabel}
           </Text>
 
-          {status === "accepted" && (
+          {status === "connecting" && (
             <Text
               style={{
                 color: theme.muted,
                 marginTop: 4,
-                fontVariant: ["tabular-nums"],
+                textAlign: "center",
               }}
             >
-              {formatCallDuration(elapsed)}
+              Waiting for secure media transport…
             </Text>
           )}
 
@@ -2745,7 +3757,7 @@ function CallOverlay({
                 }}
               >
                 Camera and microphone transport
-                require the native WebRTC build.
+                will start when native WebRTC is available.
               </Text>
             </View>
           )}
@@ -2760,10 +3772,9 @@ function CallOverlay({
             }}
           >
             Signaling is active through the relay.
-            Expo Go does not provide native
-            peer-to-peer media transport, so NexChat
-            will never pretend that audio or video
-            is connected.
+            Media is not connected in Expo Go.
+            This call will remain in a connecting state
+            until native peer-to-peer media transport is available.
           </Text>
 
           {incoming && status === "ringing" ? (
@@ -2797,7 +3808,7 @@ function CallOverlay({
           ) : (
             <Button
               label={
-                status === "accepted"
+                status === "connecting"
                   ? "End call"
                   : "Cancel call"
               }
@@ -2821,6 +3832,9 @@ function IdentitySetup({
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [communityStandardsAccepted, setCommunityStandardsAccepted] =
+    useState(false);
+  const [standardsVisible, setStandardsVisible] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -2849,11 +3863,20 @@ function IdentitySetup({
       return;
     }
 
+    if (!communityStandardsAccepted) {
+      setError(
+        "Please read and agree to the NexChat Community Standards."
+      );
+      return;
+    }
+
     try {
       setSaving(true);
       setError("");
 
-      await createAccount(normalized, password);
+      await createAccount(normalized, password, {
+        communityStandardsAccepted: true,
+      });
 
       await updateIdentity({
         username: normalized,
@@ -3076,6 +4099,112 @@ function IdentitySetup({
               marginBottom: 5,
             }}
           >
+            Community Standards
+          </Text>
+
+          <Text
+            style={{
+              color: theme.muted,
+              fontSize: 13,
+              lineHeight: 19,
+            }}
+          >
+            Please review the Community Standards before creating
+            your NexChat account.
+          </Text>
+
+          <TouchableOpacity
+            onPress={() => setStandardsVisible(true)}
+            style={{
+              marginTop: 12,
+              paddingVertical: 10,
+              alignItems: "center",
+            }}
+          >
+            <Text
+              style={{
+                color: theme.brand,
+                fontWeight: "900",
+              }}
+            >
+              Read Community Standards
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={() => {
+              setCommunityStandardsAccepted(
+                !communityStandardsAccepted
+              );
+              setError("");
+            }}
+            activeOpacity={0.75}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              marginTop: 4,
+            }}
+          >
+            <View
+              style={{
+                width: 22,
+                height: 22,
+                borderRadius: 6,
+                borderWidth: 2,
+                borderColor: communityStandardsAccepted
+                  ? theme.brand
+                  : theme.line,
+                backgroundColor: communityStandardsAccepted
+                  ? theme.brand
+                  : "transparent",
+                alignItems: "center",
+                justifyContent: "center",
+                marginRight: 10,
+              }}
+            >
+              {communityStandardsAccepted && (
+                <Text
+                  style={{
+                    color: "white",
+                    fontSize: 14,
+                    fontWeight: "900",
+                  }}
+                >
+                  ✓
+                </Text>
+              )}
+            </View>
+
+            <Text
+              style={{
+                flex: 1,
+                color: theme.ink,
+                fontSize: 13,
+                lineHeight: 19,
+              }}
+            >
+              I agree to the NexChat Community Standards
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        <View
+          style={{
+            marginTop: 20,
+            padding: 16,
+            borderRadius: 16,
+            backgroundColor: theme.card,
+            borderWidth: 1,
+            borderColor: theme.line,
+          }}
+        >
+          <Text
+            style={{
+              color: theme.ink,
+              fontWeight: "900",
+              marginBottom: 5,
+            }}
+          >
             Private by design
           </Text>
 
@@ -3099,6 +4228,117 @@ function IdentitySetup({
           />
         </View>
       </ScrollView>
+
+      <Modal
+        visible={standardsVisible}
+        animationType="slide"
+        onRequestClose={() => setStandardsVisible(false)}
+      >
+        <View
+          style={[
+            s.flex,
+            {
+              backgroundColor: theme.bg,
+              paddingTop: Platform.OS === "android" ? 12 : 0,
+            },
+          ]}
+        >
+          <Header
+            title="Community Standards"
+            subtitle="Respectful, private and safe"
+            onBack={() => setStandardsVisible(false)}
+            theme={theme}
+          />
+
+          <ScrollView
+            contentContainerStyle={{
+              padding: 12,
+              paddingBottom: 40,
+            }}
+          >
+            <View
+              style={[
+                s.section,
+                {
+                  backgroundColor: theme.card,
+                  borderColor: theme.line,
+                },
+              ]}
+            >
+              <Text
+                style={{
+                  color: theme.ink,
+                  fontSize: 20,
+                  fontWeight: "900",
+                  marginBottom: 8,
+                }}
+              >
+                NexChat Community Standards
+              </Text>
+
+              <Text
+                style={{
+                  color: theme.muted,
+                  lineHeight: 20,
+                }}
+              >
+                These standards apply to profiles, posts, videos,
+                comments, communities and other interactions on NexChat.
+              </Text>
+            </View>
+
+            {[
+              ["Respect people", "Do not use NexChat to bully, harass, threaten, stalk, humiliate, or target another person."],
+              ["No hate or discrimination", "Do not attack or degrade people because of characteristics such as race, ethnicity, nationality, religion, gender, disability, or sexual orientation."],
+              ["Protect young people", "NexChat does not allow grooming, sexual exploitation of minors, sextortion, sexual solicitation of minors, or other exploitation of young people."],
+              ["No violence or criminal harm", "Do not threaten violence, encourage serious harm, or use NexChat to facilitate serious criminal activity."],
+              ["Protect privacy", "Do not expose private phone numbers, addresses, passwords, credentials, identity documents, financial information, or private conversations without appropriate authorization."],
+              ["No scams or fraud", "Do not use NexChat for phishing, fraudulent giveaways, impersonation scams, malicious links, payment scams, or deliberately deceptive schemes."],
+              ["Be authentic", "Do not impersonate people, fabricate evidence to harm others, manipulate engagement, or deliberately deceive people with altered or AI-generated media."],
+              ["No dangerous challenges", "Do not encourage challenges, stunts, or activities that are likely to cause serious injury to yourself or someone else."],
+              ["Respect intellectual property", "Do not use NexChat to deliberately distribute content that you do not have the right to share."],
+              ["Keep NexChat secure", "Do not distribute malware, steal credentials, compromise accounts, attack NexChat infrastructure, or deliberately abuse security vulnerabilities."],
+            ].map(([title, body], index) => (
+              <View
+                key={title}
+                style={[
+                  s.section,
+                  {
+                    backgroundColor: theme.card,
+                    borderColor: theme.line,
+                    marginTop: 10,
+                  },
+                ]}
+              >
+                <Text
+                  style={{
+                    color: theme.ink,
+                    fontSize: 16,
+                    fontWeight: "900",
+                    marginBottom: 6,
+                  }}
+                >
+                  {title}
+                </Text>
+
+                <Text
+                  style={{
+                    color: theme.muted,
+                    lineHeight: 20,
+                  }}
+                >
+                  {body}
+                </Text>
+              </View>
+            ))}
+
+            <Button
+              label="I understand"
+              onPress={() => setStandardsVisible(false)}
+            />
+          </ScrollView>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -3330,7 +4570,9 @@ function LoginScreen({
   );
 }
 
-function AppContent(){const insets=useSafeAreaInsets();const [securityLocked,setSecurityLocked]=useState(false);const biometricPromptRef=useRef(false);const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);
+function AppContent(){
+console.log("[NEXCHAT BOOT 01] AppContent render START");
+const insets=useSafeAreaInsets();const [securityLocked,setSecurityLocked]=useState(false);const biometricPromptRef=useRef(false);const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);
 const [accountChecked,setAccountChecked]=useState(false);
 const [authenticated,setAuthenticated]=useState(false);
 const st=useNexChatStore();
@@ -3340,33 +4582,42 @@ type ActiveCall = {
   peerId:string;
   video:boolean;
   startedAt:string;
-  status:"calling"|"ringing"|"accepted";
+  status:"calling"|"ringing"|"connecting";
   incoming:boolean;
 };
 
 const [call,setCall]=useState<ActiveCall|null>(null);
+const callRef=useRef<ActiveCall|null>(null);
+
+const updateCall = (
+  next: ActiveCall|null,
+) => {
+  callRef.current=next;
+  setCall(next);
+};
 
 const finishCall = async (
   finalStatus: CallHistoryEntry["status"],
 ) => {
-  if(!call) return;
+  const current=callRef.current;
+  if(!current) return;
 
   const endedAt =
     new Date().toISOString();
 
   const entry:CallHistoryEntry={
-    id:call.id,
-    peerId:call.peerId,
-    type:call.video?"video":"voice",
-    direction:call.incoming
+    id:current.id,
+    peerId:current.peerId,
+    type:current.video?"video":"voice",
+    direction:current.incoming
       ?"incoming"
       :"outgoing",
     status:finalStatus,
-    startedAt:call.startedAt,
+    startedAt:current.startedAt,
     endedAt,
   };
 
-  setCall(null);
+  updateCall(null);
 
   await st.logCall(entry);
 };
@@ -3389,7 +4640,7 @@ const beginCall = async (
   const startedAt =
     new Date().toISOString();
 
-  setCall({
+  updateCall({
     id,
     peerId,
     video,
@@ -3409,7 +4660,7 @@ const beginCall = async (
     );
 
   if(!delivered){
-    setCall(null);
+    updateCall(null);
 
     await st.logCall({
       id,
@@ -3437,7 +4688,11 @@ const endCall = async () => {
     "hangup",
   );
 
-  await finishCall("failed");
+  await finishCall(
+    call.status === "calling" || call.status === "connecting"
+      ? "cancelled"
+      : "failed",
+  );
 };
 
 const acceptCall = async () => {
@@ -3455,9 +4710,9 @@ const acceptCall = async () => {
     return;
   }
 
-  setCall({
+  updateCall({
     ...call,
-    status:"accepted",
+    status:"connecting",
   });
 };
 
@@ -3473,12 +4728,179 @@ const declineCall = async () => {
   await finishCall("declined");
 };
 
-const [startupError,setStartupError]=useState<string|null>(null);const [startupRetry,setStartupRetry]=useState(0);const [splashMinDone,setSplashMinDone]=useState(false);useEffect(()=>{(async()=>{try{await initIdentity();await initVault();await st.hydrate();await initializeNetworkTransport();setIdentity(await getIdentity());
-const accountExists=await hasAccount();
-const sessionActive=await isAuthenticated();
-setAccountChecked(true);
-setAuthenticated(accountExists ? sessionActive : true);
-const bs=getPersistedSettingsSnapshot();const cfg={enabled:bs.backupEnabled,schedule:bs.backupSchedule,destination:bs.backupDestination};if(shouldRunBackup(cfg,bs.lastBackupRunAt??null)){const result=await runBackup(cfg);await st.updateSettings(result.success?{lastBackupRunAt:result.startedAt,lastBackupAttemptAt:result.startedAt,lastBackupError:undefined}:{lastBackupAttemptAt:result.startedAt,lastBackupError:result.error});}setStartupError(null)}catch(e){setStartupError(e instanceof Error?e.message:"NexChat failed to start for an unknown reason.")}})();},[startupRetry]);useEffect(()=>{
+const [startupError,setStartupError]=useState<string|null>(null);
+const [startupRetry,setStartupRetry]=useState(0);
+const [splashMinDone,setSplashMinDone]=useState(false);
+
+useEffect(()=>{
+  console.log("[NEXCHAT BOOT 02] Startup effect ENTER", { startupRetry });
+
+  (async()=>{
+    try{
+      console.log("[NEXCHAT BOOT 03] initIdentity START");
+      await initIdentity();
+      console.log("[NEXCHAT BOOT 03] initIdentity OK");
+
+      console.log("[NEXCHAT BOOT 04] initVault START");
+      await initVault();
+      console.log("[NEXCHAT BOOT 04] initVault OK");
+
+      console.log("[NEXCHAT BOOT 05] store.hydrate START");
+      await st.hydrate();
+      console.log("[NEXCHAT BOOT 05] store.hydrate OK");
+
+      console.log("[NEXCHAT BOOT 06] initializeNetworkTransport START");
+      await initializeNetworkTransport();
+      console.log("[NEXCHAT BOOT 06] initializeNetworkTransport OK");
+
+      console.log("[NEXCHAT BOOT 07] getIdentity START");
+      const restoredIdentity = await getIdentity();
+      console.log("[NEXCHAT BOOT 07] getIdentity OK", {
+        id: restoredIdentity?.id,
+        username: restoredIdentity?.username,
+        displayName: restoredIdentity?.displayName,
+      });
+      setIdentity(restoredIdentity);
+
+      console.log("[NEXCHAT BOOT 08] hasAccount START");
+      const accountExists=await hasAccount();
+      console.log("[NEXCHAT BOOT 08] hasAccount OK", { accountExists });
+
+      console.log("[NEXCHAT BOOT 09] isAuthenticated START");
+      const sessionActive=await isAuthenticated();
+      console.log("[NEXCHAT BOOT 09] isAuthenticated OK", { sessionActive });
+
+      setAccountChecked(true);
+      setAuthenticated(accountExists ? sessionActive : true);
+
+      console.log("[NEXCHAT BOOT 10] backup settings START");
+      const bs=getPersistedSettingsSnapshot();
+      const cfg={
+        enabled:bs.backupEnabled,
+        schedule:bs.backupSchedule,
+        destination:bs.backupDestination
+      };
+
+      console.log("[NEXCHAT BOOT 10] backup settings OK", {
+        enabled: cfg.enabled,
+        schedule: cfg.schedule,
+        destination: cfg.destination,
+      });
+
+      if(shouldRunBackup(cfg,bs.lastBackupRunAt??null)){
+        console.log("[NEXCHAT BOOT 11] runBackup START");
+        const result=await runBackup(cfg);
+        console.log("[NEXCHAT BOOT 11] runBackup OK", {
+          success: result.success,
+          error: result.error,
+        });
+
+        await st.updateSettings(
+          result.success
+            ? {
+                lastBackupRunAt:result.startedAt,
+                lastBackupAttemptAt:result.startedAt,
+                lastBackupError:undefined
+              }
+            : {
+                lastBackupAttemptAt:result.startedAt,
+                lastBackupError:result.error
+              }
+        );
+      }else{
+        console.log("[NEXCHAT BOOT 11] runBackup SKIPPED");
+      }
+
+      setStartupError(null);
+      console.log("[NEXCHAT BOOT 12] STARTUP COMPLETE");
+    }catch(e){
+      console.error("[NEXCHAT BOOT FAILED]", e);
+      setStartupError(
+        e instanceof Error
+          ? e.message
+          : "NexChat failed to start for an unknown reason."
+      );
+    }
+  })();
+},[startupRetry]);
+
+useEffect(()=>{
+  let mounted=true;
+
+  (async()=>{
+    try{
+      const permissions =
+        await Notifications.getPermissionsAsync();
+
+      if(
+        !permissions.granted &&
+        mounted
+      ){
+        await Notifications.requestPermissionsAsync();
+          if(Platform.OS === "android"){
+            await Notifications.setNotificationChannelAsync("messages",{
+              name:"Messages",
+              importance:Notifications.AndroidImportance.DEFAULT,
+            });
+          }
+      }
+    }catch(error){
+      console.warn(
+        "[NexChat notifications] Permission setup failed:",
+        error,
+      );
+    }
+  })();
+
+  const unsubscribe =
+    subscribeIncomingMessages(
+      (message:Message)=>{
+        const conversation =
+          st.conversations.find(
+            item => item.peerId === message.senderId,
+          );
+
+        if(conversation?.muted){
+          return;
+        }
+
+        if(
+          screen.name === "chat" &&
+          screen.peerId === message.senderId
+        ){
+          return;
+        }
+
+        void Notifications.scheduleNotificationAsync({
+          content:{
+            title:message.sender || "New message",
+            body:
+              message.text ||
+              (message.attachment
+                ? "Sent an attachment"
+                : "New message"),
+            data:{
+              peerId:message.senderId,
+              messageId:message.id,
+            },
+          },
+          trigger:null,
+        }).catch(error=>{
+          console.warn(
+            "[NexChat notifications] Schedule failed:",
+            error,
+          );
+        });
+      },
+    );
+
+  return()=>{
+    mounted=false;
+    unsubscribe();
+  };
+},[screen,st.conversations]);
+
+useEffect(()=>{
   const unsubscribe =
     subscribeCallSignals(
       (signal:CallSignal)=>{
@@ -3511,7 +4933,7 @@ const bs=getPersistedSettingsSnapshot();const cfg={enabled:bs.backupEnabled,sche
               );
           }catch{}
 
-          setCall({
+          updateCall({
             id:signal.callId,
             peerId:signal.senderId,
             video,
@@ -3535,7 +4957,7 @@ const bs=getPersistedSettingsSnapshot();const cfg={enabled:bs.backupEnabled,sche
             current
               ? {
                   ...current,
-                  status:"accepted",
+                  status:"connecting",
                 }
               : current,
           );
@@ -3548,8 +4970,11 @@ const bs=getPersistedSettingsSnapshot();const cfg={enabled:bs.backupEnabled,sche
         }
 
         if(signal.type === "hangup"){
+          const currentStatus =
+            callRef.current?.status;
+
           void finishCall(
-            call.status === "ringing"
+            currentStatus === "ringing"
               ? "missed"
               : "failed",
           );
@@ -3572,18 +4997,28 @@ useEffect(()=>{
           "hangup",
         );
 
-        void finishCall("missed");
+        void finishCall("failed");
       }else if(
         call.status === "ringing"
       ){
         void finishCall("missed");
+      }else if(
+        call.status === "connecting"
+      ){
+        void sendCallSignal(
+          call.peerId,
+          call.id,
+          "hangup",
+        );
+
+        void finishCall("failed");
       }
     },30000);
 
   return()=>clearTimeout(timeout);
 },[call?.id,call?.status]);
 
-const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)} onDeleted={()=>setScreen({name:"home"})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})}/>;switch(tab){case"Chats":return <ChatListScreen theme={theme} identity={identity} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme} onStartCall={beginCall}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <StoriesScreen theme={theme} identity={identity}/>;default:return <FeedScreen theme={theme} identity={identity}/>}},[screen,tab,theme,st]);const appReady=identity!==null||startupError!==null;
+const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)} onDeleted={()=>setScreen({name:"home"})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})} onOpenMyPosts={()=>setScreen({name:"myPosts"})}/>;if(screen.name==="myPosts")return <MyPostsScreen theme={theme} identity={identity} onBack={()=>setScreen({name:"settingsSection",section:"profile"})}/>;switch(tab){case"Chats":return <ChatListScreen theme={theme} identity={identity} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme} onStartCall={beginCall}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <StoriesScreen theme={theme} identity={identity}/>;default:return <FeedScreen theme={theme} identity={identity}/>}},[screen,tab,theme,st]);const appReady=identity!==null||startupError!==null;
 
 
 useEffect(()=>{

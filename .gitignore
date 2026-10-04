@@ -43,3 +43,7 @@ yarn-error.*
 # Local development builds
 *.apk
 *.aab
+
+# Relay runtime state
+relay/data/offline-queue.json
+relay/data/users.json
