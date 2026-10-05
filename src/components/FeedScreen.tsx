@@ -1,3 +1,4 @@
+import InlineDocumentViewer from "./InlineDocumentViewer";
 import React, {
   useCallback,
   useEffect,
@@ -27,11 +28,12 @@ import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
-import * as MediaLibrary from "expo-media-library";
+import * as MediaLibrary from "expo-media-library/legacy";
 import * as Clipboard from "expo-clipboard";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { WebView } from "react-native-webview";
 import Pdf from "react-native-pdf";
+
 import {
 } from "../core/linkResolver";
 import { ingestAttachment } from "../core/attachmentIngestion";
@@ -1312,6 +1314,30 @@ function FeedFile({
     return <FeedPdf attachment={attachment} theme={theme} />;
   }
 
+  const isInlineDocument =
+    mimeType === "application/msword" ||
+    mimeType ===
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+    mimeType === "application/vnd.ms-excel" ||
+    mimeType ===
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+    mimeType === "application/vnd.ms-powerpoint" ||
+    mimeType ===
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation" ||
+    mimeType === "text/plain" ||
+    /\.(doc|docx|xls|xlsx|ppt|pptx|txt)$/i.test(fileName);
+
+  if (isInlineDocument && attachment.uri) {
+    return (
+      <InlineDocumentViewer
+        uri={attachment.uri}
+        name={fileName}
+        mimeType={mimeType}
+        theme={theme}
+      />
+    );
+  }
+
   const fileType = mimeType.includes("/")
     ? mimeType.split("/")[1].toUpperCase()
     : "FILE";
@@ -1326,28 +1352,22 @@ function FeedFile({
         },
       ]}
     >
-      <View
-        style={[
-          styles.fileIcon,
-          {
-            backgroundColor: theme.brand,
-          },
-        ]}
-      >
-        <Text style={styles.fileIconText}>▣</Text>
+      <View style={styles.fileIcon}>
+        <Text style={[styles.fileIconText, { color: theme.brand }]}>
+          {fileType.slice(0, 4)}
+        </Text>
       </View>
 
       <View style={styles.fileInfo}>
         <Text
-          style={[styles.attachmentName, { color: theme.ink }]}
+          style={[styles.pdfName, { color: theme.ink }]}
           numberOfLines={2}
         >
           {fileName}
         </Text>
 
-        <Text style={[styles.attachmentType, { color: theme.muted }]}>
+        <Text style={[styles.pdfFeedHint, { color: theme.muted }]}>
           {fileType}
-          {attachment.size ? ` • ${formatAttachmentSize(attachment.size)}` : ""}
         </Text>
       </View>
     </View>

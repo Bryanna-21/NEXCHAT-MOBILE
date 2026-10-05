@@ -13,7 +13,6 @@ export interface BackupScheduleConfig {
   schedule: BackupSchedule;
   destination:
     | "device"
-    | "trusted-device"
     | "cloud";
 }
 
@@ -123,9 +122,7 @@ export async function runBackup(
         new Date().toISOString(),
       success: false,
       error:
-        config.destination === "cloud"
-          ? "Automatic cloud backup isn't possible: there's no NexChat server to sync to, and exporting to a cloud app requires the OS share sheet, which needs you present. Use \"Export backup file\" in Backup & Recovery to save a copy to your cloud app manually."
-          : `${config.destination} backup is not implemented yet.`,
+        "Automatic cloud backup requires the app to be open. Use Export backup file in Backup & Recovery to save the encrypted backup to your cloud storage.",
     };
   }
 

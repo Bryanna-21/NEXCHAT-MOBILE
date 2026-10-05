@@ -1,7 +1,7 @@
 import React,{useEffect,useMemo,useRef,useState} from "react";
 import {useAudioPlayer,setAudioModeAsync} from "expo-audio";
 import {SafeAreaProvider,useSafeAreaInsets} from "react-native-safe-area-context";
-import {Alert,AppState,FlatList,Image,ImageBackground,KeyboardAvoidingView,Modal,Platform,ScrollView,Share,StatusBar,StyleSheet,Switch,Text,TextInput,TouchableOpacity,View} from "react-native";
+import {Alert,AppState,BackHandler,FlatList,Image,ImageBackground,KeyboardAvoidingView,Modal,Platform,ScrollView,Share,StatusBar,StyleSheet,Switch,Text,TextInput,TouchableOpacity,View} from "react-native";
 import * as Clipboard from "expo-clipboard";
 import {
   authenticateBiometric,
@@ -12,7 +12,8 @@ import * as LocalAuthentication from "expo-local-authentication";
 import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
-import * as Notifications from "expo-notifications";
+import * as DocumentPicker from "expo-document-picker";
+import Constants from "expo-constants";
 import {initIdentity,getIdentity,Identity,updateIdentity} from "./src/core/identity";
 import {
   createAccount,
@@ -23,7 +24,7 @@ import {
   logout,
 } from "./src/core/account";
 import {initVault,verifyVault,getVaultSize,clearVault} from "./src/core/vault";
-import {createBackupSnapshot,restoreFromBackup} from "./src/core/backup";
+import {createBackupSnapshot,restoreFromBackup,exportBackupToFile,importBackupFromFile} from "./src/core/backup";
 import {useNexChatStore,Attachment,Conversation,NexContact,Message,MessageStatus,CallHistoryEntry,getPersistedSettingsSnapshot,initializeNetworkTransport} from "./src/core/store";
 import {shouldRunBackup,runBackup} from "./src/core/backupScheduler";
 import {MediaPicker} from "./src/components/MediaPicker";
@@ -52,14 +53,26 @@ import MyPostViewer from "./src/components/MyPostViewer";
 import {FeedPost,getFeedFollowCounts,loadFeedPosts,loadHiddenFeedPostIds,setFeedPostHidden} from "./src/core/feed";
 import {PasscodeManager} from "./src/components/PasscodeManager";
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
+const isExpoGo =
+  Constants.executionEnvironment === Constants.ExecutionEnvironment.StoreClient;
+
+let Notifications:
+  | typeof import("expo-notifications")
+  | null = null;
+
+if (!isExpoGo) {
+  const nativeNotifications = require("expo-notifications");
+  Notifications = nativeNotifications;
+
+  nativeNotifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+    }),
+  });
+}
 
 type Tab="Chats"|"Stories"|"Feed"|"Calls"|"Settings";
 type Screen={name:"home"}|{name:"chat";peerId:string}|{name:"new"}|{name:"contact";peerId:string}|{name:"settings"}|{name:"settingsSection";section:string}|{name:"myPosts"};
@@ -786,7 +799,7 @@ function MessageBubble({
       style?: "cancel" | "destructive";
     }[] = [];
 
-    if (m.text?.trim()) {
+    if (m.text?.trim() && !m.viewOnce) {
       actions.push({
         text: "Copy",
         onPress: copyMessage,
@@ -845,19 +858,14 @@ function MessageBubble({
           This message was deleted
         </Text>
       ) : hidden ? (
-        <TouchableOpacity
-          onPress={onViewOnce}
-          activeOpacity={0.7}
+        <Text
+          style={{
+            fontWeight: "800",
+            color: theme.muted,
+          }}
         >
-          <Text
-            style={{
-              fontWeight: "800",
-              color: theme.ink,
-            }}
-          >
-            👁 View once • tap to open
-          </Text>
-        </TouchableOpacity>
+          👁 Viewed
+        </Text>
       ) : m.callInfo ? (
         <View style={{flexDirection:"row",alignItems:"center",gap:8}}>
           <Text style={{fontSize:18}}>{m.callInfo.type==="video"?"🎥":"📞"}</Text>
@@ -974,6 +982,32 @@ function Chat({
   const [edit, setEdit] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const [voiceVisible, setVoiceVisible] = useState(false);
+  const [viewOnceMessage, setViewOnceMessage] = useState<{
+    id: string;
+    text: string;
+  } | null>(null);
+
+  const openViewOnce = (message: Message) => {
+    if (
+      message.sender === "me" ||
+      !message.viewOnce ||
+      message.viewedAt ||
+      !message.text
+    ) {
+      return;
+    }
+
+    setViewOnceMessage({
+      id: message.id,
+      text: message.text,
+    });
+
+    void st.markViewOnce(message.id);
+  };
+
+  const closeViewOnce = () => {
+    setViewOnceMessage(null);
+  };
 
   useEffect(() => {
     return () => {
@@ -1136,7 +1170,97 @@ function Chat({
   };
 
   return (
-    <KeyboardAvoidingView
+    <>
+      <Modal
+        visible={!!viewOnceMessage}
+        animationType="fade"
+        presentationStyle="fullScreen"
+        onRequestClose={closeViewOnce}
+      >
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: "#000000",
+            justifyContent: "center",
+            paddingHorizontal: 28,
+          }}
+        >
+          <View
+            style={{
+              position: "absolute",
+              top: Platform.OS === "ios" ? 56 : 28,
+              left: 20,
+              right: 20,
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <Text
+              style={{
+                color: "#FFFFFF",
+                fontSize: 16,
+                fontWeight: "800",
+              }}
+            >
+              👁 View once
+            </Text>
+
+            <TouchableOpacity
+              onPress={closeViewOnce}
+              hitSlop={12}
+              activeOpacity={0.7}
+            >
+              <Text
+                style={{
+                  color: "#FFFFFF",
+                  fontSize: 30,
+                  fontWeight: "300",
+                }}
+              >
+                ×
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <View
+            style={{
+              backgroundColor: "#151515",
+              borderRadius: 20,
+              padding: 24,
+              borderWidth: 1,
+              borderColor: "#333333",
+            }}
+          >
+            <Text
+              style={{
+                color: "#FFFFFF",
+                fontSize: 20,
+                lineHeight: 30,
+                fontWeight: "500",
+              }}
+            >
+              {viewOnceMessage?.text}
+            </Text>
+          </View>
+
+          <Text
+            style={{
+              position: "absolute",
+              bottom: Platform.OS === "ios" ? 45 : 28,
+              left: 28,
+              right: 28,
+              color: "#999999",
+              fontSize: 12,
+              textAlign: "center",
+            }}
+          >
+            This message can only be viewed once.
+          </Text>
+        </View>
+      </Modal>
+
+      <KeyboardAvoidingView
       style={[s.flex, { backgroundColor: chatBackground }]}
       behavior={Platform.OS === "ios" ? "padding" : "height"}
       keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 24}
@@ -1208,7 +1332,7 @@ function Chat({
                 ]
               )
             }
-            onViewOnce={() => st.markViewOnce(item.id)}
+            onViewOnce={() => openViewOnce(item)}
           />
         )}
           ListFooterComponent={
@@ -1286,10 +1410,21 @@ function Chat({
           {peerTyping && (
             <View
               style={{
-                minHeight: 22,
+                alignSelf: "flex-start",
+                minWidth: 54,
+                minHeight: 32,
                 justifyContent: "center",
-                paddingLeft: 12,
-                marginBottom: 4,
+                paddingHorizontal: 15,
+                marginLeft: 8,
+                marginBottom: 6,
+                borderRadius: 18,
+                backgroundColor: effectiveTheme.card,
+                borderWidth: 1,
+                borderColor: effectiveTheme.line,
+                shadowOpacity: Platform.OS === "ios" ? 0.08 : 0,
+                shadowRadius: 3,
+                shadowOffset: { width: 0, height: 1 },
+                elevation: 1,
               }}
             >
               <TypingDots color={effectiveTheme.brand} size={7} />
@@ -1364,6 +1499,7 @@ function Chat({
         </Modal>
       )}
     </KeyboardAvoidingView>
+    </>
   );
 }
 
@@ -2773,632 +2909,199 @@ if(section==="profile") {
   );
 }
 
-if(section==="backup")return <View style={s.flex}><Header title="Backup & Recovery" subtitle="Encrypted local-first recovery" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={{padding:12,paddingBottom:40}}><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><View style={{padding:14,paddingBottom:10}}><Text style={[s.bigStat,{color:theme.ink}]}>{(st.vaultBytes/1024).toFixed(1)} KB</Text><Text style={{color:theme.muted}}>Current encrypted vault estimate</Text></View><Row icon="💾" title="Automatic backup" theme={theme} subtitle={st.settings.backupEnabled?st.settings.backupSchedule:"Off"} right={<Switch value={st.settings.backupEnabled} onValueChange={v=>st.updateSettings({backupEnabled:v})}/>} /><View style={{paddingHorizontal:14,paddingTop:8}}><Text style={[s.label,{color:theme.ink}]}>Schedule</Text><View style={{flexDirection:"row",gap:8,flexWrap:"wrap",marginTop:8}}>{(["daily","weekly","monthly","off"] as const).map(x=><TouchableOpacity key={x} onPress={()=>st.updateSettings({backupSchedule:x,backupEnabled:x!=="off"})} style={[s.chip,{borderColor:theme.line,backgroundColor:st.settings.backupSchedule===x?theme.brand:theme.card}]}><Text style={{color:st.settings.backupSchedule===x?"white":theme.ink,fontWeight:"800"}}>{x}</Text></TouchableOpacity>)}</View></View><View style={{padding:14,paddingTop:8}}><Text style={[s.label,{color:theme.ink}]}>Destination</Text></View>{(["device","trusted-device","cloud"] as const).map(x=><Row key={x} icon={x==="cloud"?"☁️":"📱"} title={x} theme={theme} right={<Switch value={st.settings.backupDestination===x} onValueChange={()=>st.updateSettings({backupDestination:x})}/>} />)}</View><View style={{gap:10,marginTop:2}}><Button label="Back up now" onPress={async()=>{try{await createBackupSnapshot();Alert.alert("Backup created","Your encrypted vault has been backed up on this device.")}catch(e){Alert.alert("Backup failed",e instanceof Error?e.message:"Unable to create backup.")}}}/><Button label="Restore from backup" secondary onPress={()=>Alert.alert("Restore from backup","This will replace your current chats and settings with the last backup on this device. This cannot be undone.",[{text:"Restore",style:"destructive",onPress:async()=>{try{await restoreFromBackup();await st.hydrate();Alert.alert("Restore complete","Your data has been restored from backup.")}catch(e){Alert.alert("Restore failed",e instanceof Error?e.message:"Unable to restore backup.")}}},{text:"Cancel",style:"cancel"}])}/><Button label="Verify encrypted vault" onPress={async()=>Alert.alert("Vault verification",(await verifyVault())?"Vault encryption and decryption succeeded.":"Vault verification failed.")}/><Button label="Generate Recovery Kit" secondary onPress={async()=>{const path=`${FileSystem.cacheDirectory}nexchat-recovery-kit.txt`;await FileSystem.writeAsStringAsync(path,`NexChat Recovery Kit\n\nAccount: ${id?.id||"local"}\nGenerated: ${new Date().toISOString()}\n\nThis file contains recovery instructions only. It does not contain plaintext messages or the raw vault key.\n`);if(await Sharing.isAvailableAsync())await Sharing.shareAsync(path);else Alert.alert("Recovery Kit created",path)}}/><Text style={{color:theme.muted}}>Cloud backup remains optional. Recovery material must never expose plaintext chats or raw encryption keys.</Text></View></ScrollView></View>;
-if(section==="appearance")return <View style={s.flex}><Header title="Appearance & Themes" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}>{(["system","light","dark"] as const).map(x=><Row key={x} icon="🎨" title={x} right={<Switch value={st.settings.theme===x} onValueChange={()=>st.updateSettings({theme:x})}/>}  theme={theme}/>)}</ScrollView></View>;
-if(section==="privacy")return <View style={s.flex}><Header title="Privacy" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={{padding:12,paddingBottom:40}}><View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}><Row icon="✓" title="Read receipts" theme={theme} right={<Switch value={st.settings.readReceipts} onValueChange={v=>st.updateSettings({readReceipts:v})}/>} /><Row icon="●" title="Online status" theme={theme} right={<Switch value={st.settings.onlineStatus} onValueChange={v=>st.updateSettings({onlineStatus:v})}/>} /><Row icon="◷" title="Last seen" theme={theme} right={<Switch value={st.settings.lastSeen} onValueChange={v=>st.updateSettings({lastSeen:v})}/>} /><Row icon="🔗" title="Link previews" theme={theme} right={<Switch value={st.settings.linkPreviews} onValueChange={v=>st.updateSettings({linkPreviews:v})}/>} /><Row icon="🚫" title="Blocked contacts" theme={theme} subtitle={`${st.blockedIds.length}`} /></View></ScrollView></View>;
-if(section==="chats"){
-  const messageColors = [
-    {name:"Green",color:"#25D366"},
-    {name:"Blue",color:"#2F80ED"},
-    {name:"Pink",color:"#E91E63"},
-    {name:"Red",color:"#EF4444"},
-    {name:"Purple",color:"#8B5CF6"},
-    {name:"Orange",color:"#F97316"},
-    {name:"Teal",color:"#14B8A6"},
-    {name:"Gray",color:"#64748B"},
-  ];
+if(section==="backup")return <View style={s.flex}>
+<Header title="Backup & Recovery" subtitle="Encrypted local-first recovery" onBack={onBack} theme={theme}/>
+<ScrollView contentContainerStyle={{padding:12,paddingBottom:40}}>
+<View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}>
+<View style={{padding:14,paddingBottom:10}}>
+<Text style={[s.bigStat,{color:theme.ink}]}>{(st.vaultBytes/1024).toFixed(1)} KB</Text>
+<Text style={{color:theme.muted}}>Current encrypted vault estimate</Text>
+</View>
 
-  const backgroundColors = [
-    {name:"Green",color:"#25D366"},
-    {name:"Blue",color:"#2F80ED"},
-    {name:"Pink",color:"#E91E63"},
-    {name:"Red",color:"#EF4444"},
-    {name:"Purple",color:"#8B5CF6"},
-    {name:"Orange",color:"#F97316"},
-    {name:"Teal",color:"#14B8A6"},
-    {name:"Gray",color:"#64748B"},
-  ];
+<Row
+  icon="💾"
+  title="Automatic backup"
+  theme={theme}
+  subtitle={st.settings.backupEnabled?st.settings.backupSchedule:"Off"}
+  right={<Switch value={st.settings.backupEnabled} onValueChange={v=>st.updateSettings({backupEnabled:v})}/>}
+/>
 
-  const chooseChatBackgroundImage = async () => {
-    try {
-      const permission =
-        await ImagePicker.requestMediaLibraryPermissionsAsync();
+<View style={{paddingHorizontal:14,paddingTop:8}}>
+<Text style={[s.label,{color:theme.ink}]}>Schedule</Text>
+<View style={{flexDirection:"row",gap:8,flexWrap:"wrap",marginTop:8}}>
+{(["daily","weekly","monthly","off"] as const).map(x=>
+<TouchableOpacity
+  key={x}
+  onPress={()=>st.updateSettings({backupSchedule:x,backupEnabled:x!=="off"})}
+  style={[s.chip,{borderColor:theme.line,backgroundColor:st.settings.backupSchedule===x?theme.brand:theme.card}]}
+>
+<Text style={{color:st.settings.backupSchedule===x?"white":theme.ink,fontWeight:"800"}}>{x}</Text>
+</TouchableOpacity>
+)}
+</View>
+</View>
 
-      if (!permission.granted) {
-        Alert.alert(
-          "Photo access required",
-          "Allow NexChat to access your photos so you can choose a chat background."
-        );
-        return;
+<View style={{padding:14,paddingTop:8}}>
+<Text style={[s.label,{color:theme.ink}]}>Destination</Text>
+</View>
+
+{(["device","cloud"] as const).map(x=>
+<Row
+  key={x}
+  icon={x==="cloud"?"☁️":"📱"}
+  title={x==="device"?"This device":"Cloud / exported file"}
+  theme={theme}
+  subtitle={x==="device"?"Automatic encrypted local backup":"Encrypted backup file via the system share/file picker"}
+  right={<Switch value={st.settings.backupDestination===x} onValueChange={()=>st.updateSettings({backupDestination:x})}/>}
+ />
+)}
+
+</View>
+
+<View style={{gap:10,marginTop:2}}>
+<Button
+  label="Back up now"
+  onPress={async()=>{
+    try{
+      await createBackupSnapshot();
+      Alert.alert("Backup created","Your encrypted vault has been backed up on this device.");
+    }catch(e){
+      Alert.alert("Backup failed",e instanceof Error?e.message:"Unable to create backup.");
+    }
+  }}
+/>
+
+<Button
+  label="Restore from backup"
+  secondary
+  onPress={()=>Alert.alert(
+    "Restore from backup",
+    "This will replace your current chats and settings with the last backup on this device. This cannot be undone.",
+    [
+      {
+        text:"Restore",
+        style:"destructive",
+        onPress:async()=>{
+          try{
+            await restoreFromBackup();
+            await st.hydrate();
+            Alert.alert("Restore complete","Your data has been restored from backup.");
+          }catch(e){
+            Alert.alert("Restore failed",e instanceof Error?e.message:"Unable to restore backup.");
+          }
+        }
+      },
+      {text:"Cancel",style:"cancel"}
+    ]
+  )}
+/>
+
+<Button
+  label="Verify encrypted vault"
+  onPress={async()=>{
+    Alert.alert(
+      "Vault verification",
+      (await verifyVault())
+        ?"Vault encryption and decryption succeeded."
+        :"Vault verification failed."
+    );
+  }}
+/>
+
+<Button
+  label="Export encrypted backup"
+  onPress={async()=>{
+    try{
+      const path=await exportBackupToFile();
+
+      if(await Sharing.isAvailableAsync()){
+        await Sharing.shareAsync(path);
+      }else{
+        Alert.alert("Backup exported",path);
       }
-
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ["images"],
-        allowsEditing: false,
-        quality: 1,
-      });
-
-      if (result.canceled) return;
-
-      const asset = result.assets?.[0];
-
-      if (!asset?.uri) {
-        Alert.alert(
-          "Background image",
-          "No image was returned by the device."
-        );
-        return;
-      }
-
-      const sourceUri = asset.uri;
-      const documentDirectory = FileSystem.documentDirectory;
-
-      if (!documentDirectory) {
-        throw new Error("NexChat could not access local storage.");
-      }
-
-      const oldUri = st.settings.chatBackgroundImage;
-      const extension =
-        sourceUri.split(".").pop()?.split("?")[0] || "jpg";
-
-      const destinationUri =
-        `${documentDirectory}nexchat-chat-background-${Date.now()}.${extension}`;
-
-      await FileSystem.copyAsync({
-        from: sourceUri,
-        to: destinationUri,
-      });
-
-      await st.updateSettings({
-        chatBackground: "custom",
-        chatBackgroundColor: undefined,
-        chatBackgroundImage: destinationUri,
-      });
-
-      if (oldUri && oldUri !== destinationUri) {
-        try {
-          await FileSystem.deleteAsync(oldUri, {
-            idempotent: true,
-          });
-        } catch {}
-      }
-    } catch (e) {
-      console.error("NexChat chat background picker error:", e);
-
+    }catch(e){
       Alert.alert(
-        "Background image",
-        e instanceof Error
-          ? e.message
-          : "Unable to choose that image."
+        "Export failed",
+        e instanceof Error?e.message:"Unable to export backup."
       );
     }
-  };
+  }}
+/>
 
-  const removeChatBackgroundImage = async () => {
-    const oldUri = st.settings.chatBackgroundImage;
+<Button
+  label="Import encrypted backup"
+  secondary
+  onPress={async()=>{
+    try{
+      const result=await DocumentPicker.getDocumentAsync({
+        type:"application/json",
+        copyToCacheDirectory:true,
+        multiple:false,
+      });
 
-    await st.updateSettings({
-      chatBackgroundImage: undefined,
-      chatBackground: "system",
-      chatBackgroundColor: undefined,
-    });
+      if(result.canceled || !result.assets?.[0]?.uri){
+        return;
+      }
 
-    if (oldUri) {
-      try {
-        await FileSystem.deleteAsync(oldUri, { idempotent: true });
-      } catch {}
-    }
-  };
-
-  const selectSolidBackground = async (color:string) => {
-    const oldUri = st.settings.chatBackgroundImage;
-
-    await st.updateSettings({
-      chatBackground: "custom",
-      chatBackgroundColor: color,
-      chatBackgroundImage: undefined,
-    });
-
-    if (oldUri) {
-      try {
-        await FileSystem.deleteAsync(oldUri, {
-          idempotent: true,
-        });
-      } catch {}
-    }
-  };
-
-  return (
-    <View style={s.flex}>
-      <Header title="Chat settings" onBack={onBack} theme={theme}/>
-
-      <View
-        style={{
-          flexDirection:"row",
-          marginHorizontal:12,
-          marginTop:10,
-          padding:4,
-          borderRadius:12,
-          backgroundColor:theme.surface,
-        }}
-      >
-        {[
-          {id:"colors" as const,label:"Message Colors"},
-          {id:"background" as const,label:"Chat Background"},
-        ].map(tab=>(
-          <TouchableOpacity
-            key={tab.id}
-            onPress={()=>setChatSettingsTab(tab.id)}
-            style={{
-              flex:1,
-              paddingVertical:11,
-              borderRadius:9,
-              alignItems:"center",
-              backgroundColor:
-                chatSettingsTab===tab.id ? theme.card : "transparent",
-              borderWidth:chatSettingsTab===tab.id ? 1 : 0,
-              borderColor:theme.line,
-            }}
-          >
-            <Text
-              style={{
-                color:chatSettingsTab===tab.id ? theme.ink : theme.muted,
-                fontWeight:"800",
-                fontSize:12,
-              }}
-            >
-              {tab.label}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      <ScrollView contentContainerStyle={s.form}>
-        {chatSettingsTab==="colors" ? (
-          <>
-            <Row
-              icon="⏱"
-              title="Default disappearing messages"
-              subtitle={
-                st.settings.defaultDisappearingSeconds
-                  ? `${st.settings.defaultDisappearingSeconds}s`
-                  : "Off"
-              }
-              onPress={()=>Alert.alert("Default timer","Choose",[
-                {
-                  text:"Off",
-                  onPress:()=>st.updateSettings({
-                    defaultDisappearingSeconds:0
-                  })
-                },
-                {
-                  text:"24 hours",
-                  onPress:()=>st.updateSettings({
-                    defaultDisappearingSeconds:86400
-                  })
-                },
-                {
-                  text:"7 days",
-                  onPress:()=>st.updateSettings({
-                    defaultDisappearingSeconds:604800
-                  })
-                }
-              ])}
-              theme={theme}
-            />
-
-            <Row
-              icon="👁"
-              title="Default view-once"
-              right={
-                <Switch
-                  value={st.settings.defaultViewOnce}
-                  onValueChange={v=>st.updateSettings({
-                    defaultViewOnce:v
-                  })}
-                />
-              }
-              theme={theme}
-            />
-
-            <Row
-              icon="📦"
-              title="Pull down to open Archive"
-              subtitle="Pull down from the top of Chats to open Archived Chats."
-              right={
-                <Switch
-                  value={st.settings.pullDownToArchive}
-                  onValueChange={v=>st.updateSettings({
-                    pullDownToArchive:v
-                  })}
-                />
-              }
-              theme={theme}
-            />
-
-            <View style={{marginTop:18}}>
-              <Text style={[s.label,{color:theme.ink}]}>
-                Message colors
-              </Text>
-              <Text style={{color:theme.muted,marginBottom:12}}>
-                Choose the bubble color used for sent and received messages.
-              </Text>
-
-              <Text
-                style={{
-                  color:theme.ink,
-                  fontWeight:"800",
-                  marginBottom:8
-                }}
-              >
-                Sent messages
-              </Text>
-
-              <View
-                style={{
-                  flexDirection:"row",
-                  flexWrap:"wrap",
-                  gap:10,
-                  marginBottom:18
-                }}
-              >
-                <TouchableOpacity
-                  onPress={()=>st.updateSettings({
-                    messageColorMe:undefined
-                  })}
-                  style={{
-                    width:46,
-                    height:46,
-                    borderRadius:23,
-                    borderWidth:3,
-                    borderColor:
-                      !st.settings.messageColorMe
-                        ? theme.brand
-                        : theme.line,
-                    backgroundColor:theme.card,
-                    alignItems:"center",
-                    justifyContent:"center",
-                  }}
-                >
-                  <Text
-                    style={{
-                      color:theme.ink,
-                      fontSize:11,
-                      fontWeight:"800"
-                    }}
-                  >
-                    DEF
-                  </Text>
-                </TouchableOpacity>
-
-                {messageColors.map(x=>(
-                  <TouchableOpacity
-                    key={`me-${x.color}`}
-                    onPress={()=>st.updateSettings({
-                      messageColorMe:x.color
-                    })}
-                    style={{
-                      width:46,
-                      height:46,
-                      borderRadius:23,
-                      backgroundColor:x.color,
-                      borderWidth:3,
-                      borderColor:
-                        st.settings.messageColorMe===x.color
-                          ? theme.ink
-                          : theme.card,
-                    }}
-                  />
-                ))}
-              </View>
-
-              <Text
-                style={{
-                  color:theme.ink,
-                  fontWeight:"800",
-                  marginBottom:8
-                }}
-              >
-                Received messages
-              </Text>
-
-              <View style={{marginTop:18}}>
-                <Button
-                  label="Reset message colors"
-                  secondary
-                  onPress={()=>st.updateSettings({
-                    messageColorMe:undefined,
-                    messageColorThem:undefined,
-                  })}
-                  theme={theme}
-                />
-              </View>
-
-              <View
-                style={{
-                  flexDirection:"row",
-                  flexWrap:"wrap",
-                  gap:10
-                }}
-              >
-                <TouchableOpacity
-                  onPress={()=>st.updateSettings({
-                    messageColorThem:undefined
-                  })}
-                  style={{
-                    width:46,
-                    height:46,
-                    borderRadius:23,
-                    borderWidth:3,
-                    borderColor:
-                      !st.settings.messageColorThem
-                        ? theme.brand
-                        : theme.line,
-                    backgroundColor:theme.card,
-                    alignItems:"center",
-                    justifyContent:"center",
-                  }}
-                >
-                  <Text
-                    style={{
-                      color:theme.ink,
-                      fontSize:11,
-                      fontWeight:"800"
-                    }}
-                  >
-                    DEF
-                  </Text>
-                </TouchableOpacity>
-
-                {messageColors.map(x=>(
-                  <TouchableOpacity
-                    key={`them-${x.color}`}
-                    onPress={()=>st.updateSettings({
-                      messageColorThem:x.color
-                    })}
-                    style={{
-                      width:46,
-                      height:46,
-                      borderRadius:23,
-                      backgroundColor:x.color,
-                      borderWidth:3,
-                      borderColor:
-                        st.settings.messageColorThem===x.color
-                          ? theme.ink
-                          : theme.card,
-                    }}
-                  />
-                ))}
-              </View>
-            </View>
-          </>
-        ) : (
-          <>
-            <Text style={[s.label,{color:theme.ink}]}>
-              Chat Background
-            </Text>
-
-            <Text style={{color:theme.muted,marginBottom:14}}>
-              Choose a solid wallpaper or use a photo stored on this device.
-            </Text>
-
-            <Text
-              style={{
-                color:theme.ink,
-                fontWeight:"800",
-                marginBottom:8
-              }}
-            >
-              Solid colors
-            </Text>
-
-            <View
-              style={{
-                flexDirection:"row",
-                flexWrap:"wrap",
-                gap:12,
-                marginBottom:22
-              }}
-            >
-              <TouchableOpacity
-                onPress={async()=>{
-                  const oldUri=st.settings.chatBackgroundImage;
-                  await st.updateSettings({
-                    chatBackground:"system",
-                    chatBackgroundColor:undefined,
-                    chatBackgroundImage:undefined,
-                  });
-                  if(oldUri){
-                    try{
-                      await FileSystem.deleteAsync(oldUri,{idempotent:true});
-                    }catch{}
-                  }
-                }}
-                style={{
-                  width:52,
-                  height:52,
-                  borderRadius:26,
-                  borderWidth:3,
-                  borderColor:
-                    st.settings.chatBackground==="system"
-                      ? theme.brand
-                      : theme.line,
-                  backgroundColor:theme.card,
-                  alignItems:"center",
-                  justifyContent:"center",
-                }}
-              >
-                <Text
-                  style={{
-                    color:theme.ink,
-                    fontSize:10,
-                    fontWeight:"800"
-                  }}
-                >
-                  DEF
-                </Text>
-              </TouchableOpacity>
-
-              {backgroundColors.map(x=>{
-                const selected =
-                  st.settings.chatBackground==="custom" &&
-                  st.settings.chatBackgroundColor===x.color &&
-                  !st.settings.chatBackgroundImage;
-
-                return (
-                  <TouchableOpacity
-                    key={x.color}
-                    onPress={()=>selectSolidBackground(x.color)}
-                    style={{
-                      width:52,
-                      height:52,
-                      borderRadius:26,
-                      backgroundColor:x.color,
-                      borderWidth:3,
-                      borderColor:
-                        selected ? theme.ink : theme.card,
-                    }}
-                  />
+      Alert.alert(
+        "Restore backup",
+        "This will replace your current chats and settings with the selected encrypted backup. This cannot be undone.",
+        [
+          {
+            text:"Restore",
+            style:"destructive",
+            onPress:async()=>{
+              try{
+                await importBackupFromFile(result.assets[0].uri);
+                await st.hydrate();
+                Alert.alert(
+                  "Restore complete",
+                  "Your data has been restored from the encrypted backup."
                 );
-              })}
-            </View>
-
-            <View
-              style={{
-                borderTopWidth:1,
-                borderTopColor:theme.line,
-                paddingTop:18
-              }}
-            >
-              <Text
-                style={{
-                  color:theme.ink,
-                  fontWeight:"800",
-                  marginBottom:8
-                }}
-              >
-                Custom from device
-              </Text>
-
-              {st.settings.chatBackgroundImage ? (
-                <View>
-                  <Image
-                    source={{uri:st.settings.chatBackgroundImage}}
-                    style={{
-                      width:"100%",
-                      height:180,
-                      borderRadius:14,
-                      backgroundColor:theme.surface,
-                    }}
-                    resizeMode="cover"
-                  />
-
-                  <View style={{marginTop:10}}>
-                    <Button
-                      label="Remove custom image"
-                      secondary
-                      onPress={removeChatBackgroundImage}
-                      theme={theme}
-                    />
-                  </View>
-                </View>
-              ) : (
-                <Button
-                  label="Choose image from device"
-                  onPress={chooseChatBackgroundImage}
-                  theme={theme}
-                />
-              )}
-
-              <Text
-                style={{
-                  color:theme.muted,
-                  fontSize:12,
-                  marginTop:10,
-                  lineHeight:18
-                }}
-              >
-                The selected image is copied into NexChat's private local
-                storage so it remains available after restarting the app.
-              </Text>
-            </View>
-          </>
-        )}
-      </ScrollView>
-    </View>
-  );
-}
-if(section==="media")return <View style={s.flex}><Header title="Media & Storage" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><Row icon="⬇" title="Auto-download media" right={<Switch value={st.settings.autoDownload} onValueChange={v=>st.updateSettings({autoDownload:v})}/>} theme={theme}/><Row icon="🔗" title="Link previews" right={<Switch value={st.settings.linkPreviews} onValueChange={v=>st.updateSettings({linkPreviews:v})}/>} theme={theme}/><Text style={{color:theme.muted}}>Media is indexed by attachment ID so shared photos/videos/files can be retrieved from the chat without scanning the entire message payload.</Text><Button label="Clear cache" secondary onPress={()=>Alert.alert("Cache","Cache clearing is safe: it does not delete your encrypted messages.")}/></ScrollView></View>;
-if(section==="p2p"){
-  const routes=["automatic","relay","bluetooth","wifi-direct"] as const;
-  const labels:{
-    [key:string]:{icon:string;title:string;subtitle:string}
-  }={
-    automatic:{icon:"🌐",title:"Automatic",subtitle:"Select the safest available route"},
-    relay:{icon:"🛡",title:"Prefer relay",subtitle:"Avoid direct peer addressing when possible"},
-    bluetooth:{icon:"📶",title:"Bluetooth",subtitle:"Requires native development build"},
-    "wifi-direct":{icon:"📡",title:"Wi-Fi Direct",subtitle:"Requires native development build"}
-  };
-
-  return <View style={s.flex}>
-    <Header title="Connections / P2P" subtitle="Privacy-first transport controls" onBack={onBack} theme={theme}/>
-    <ScrollView contentContainerStyle={s.form}>
-      <View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}>
-        <Text style={[s.sectionTitle,{color:theme.ink}]}>Preferred route</Text>
-        {routes.map(route=>(
-          <Row
-            key={route}
-            icon={labels[route].icon}
-            title={labels[route].title}
-            subtitle={labels[route].subtitle}
-            theme={theme}
-            right={
-              <Switch
-                value={st.settings.p2pRoute===route}
-                onValueChange={()=>st.updateSettings({p2pRoute:route})}
-              />
+              }catch(e){
+                Alert.alert(
+                  "Import failed",
+                  e instanceof Error?e.message:"Unable to import backup."
+                );
+              }
             }
-          />
-        ))}
-      </View>
+          },
+          {text:"Cancel",style:"cancel"}
+        ]
+      );
+    }catch(e){
+      Alert.alert(
+        "Import failed",
+        e instanceof Error?e.message:"Unable to select backup."
+      );
+    }
+  }}
+/>
 
-      <RelaySettings theme={theme} st={st} />
+<Button
+  label="Generate Recovery Kit"
+  secondary
+  onPress={async()=>{
+    const path=`${FileSystem.cacheDirectory}nexchat-recovery-kit.txt`;
+    await FileSystem.writeAsStringAsync(
+      path,
+      `NexChat Recovery Kit\\n\\nAccount: ${id?.id||"local"}\\nGenerated: ${new Date().toISOString()}\\n\\nThis file contains recovery instructions only. It does not contain plaintext messages or the raw vault key.\\n`
+    );
+    if(await Sharing.isAvailableAsync())
+      await Sharing.shareAsync(path);
+    else
+      Alert.alert("Recovery Kit created",path);
+  }}
+/>
 
-      <View style={[s.section,{backgroundColor:theme.card,borderColor:theme.line}]}>
-        <Row
-          icon="🔗"
-          title="Allow direct connections"
-          subtitle="Permit direct peer transport when supported"
-          theme={theme}
-          right={
-            <Switch
-              value={!!st.settings.allowDirectP2P}
-              onValueChange={v=>st.updateSettings({allowDirectP2P:v})}
-            />
-          }
-        />
+<Text style={{color:theme.muted}}>
+Cloud backup is currently a manual encrypted export. Trusted-device automatic backup is not offered until a real device-to-device recovery transport exists.
+</Text>
 
-        <Row
-          icon="👁"
-          title="Hide direct address"
-          subtitle="Do not expose direct network addressing"
-          theme={theme}
-          right={
-            <Switch
-              value={st.settings.hideDirectAddress!==false}
-              onValueChange={v=>st.updateSettings({hideDirectAddress:v})}
-            />
-          }
-        />
-      </View>
+</View>
+</ScrollView>
+</View>;
 
-      <Text style={{color:theme.muted}}>
-        Expo Go can test these controls and local storage. Real Bluetooth,
-        Wi-Fi Direct and WebRTC transport require the native development build.
-      </Text>
-    </ScrollView>
-  </View>;
-}if(section==="blocked")return <View style={s.flex}><Header title="Blocked contacts" onBack={onBack} theme={theme}/><FlatList data={st.blockedIds} keyExtractor={x=>x} contentContainerStyle={s.form} ListEmptyComponent={<Text style={{color:theme.muted}}>No blocked contacts.</Text>} renderItem={({item})=><Row icon="🚫" title={item} theme={theme} right={<Button label="Unblock" secondary onPress={()=>st.unblock(item)}/>}/>} /></View>;
 if(section==="security")return <View style={s.flex}><Header title="Account & Security" onBack={onBack} theme={theme}/><ScrollView contentContainerStyle={s.form}><PasscodeManager theme={theme}/><Button label="Verify with device biometrics" onPress={async()=>{try{const enabled=await isBiometricEnabled();if(!enabled){Alert.alert("Biometric app lock","Enable Biometric app lock first.");return;}const verified=await authenticateBiometric();Alert.alert("Biometric verification",verified?"Verified.":"Verification cancelled or failed.")}catch(e){Alert.alert("Biometric verification",e instanceof Error?e.message:"Biometric verification failed.")}}}/><Row icon="🔒" title="Biometric app lock" theme={theme} subtitle={st.settings.biometricLock?"Locks NexChat when it leaves the foreground":"Require biometric authentication when NexChat returns"} right={<Switch value={st.settings.biometricLock} onValueChange={async v=>{try{await setBiometricEnabled(v);await st.updateSettings({biometricLock:v});if(v)Alert.alert("Biometric app lock","Biometric app lock is now enabled.");}catch(e){Alert.alert("Biometric app lock",e instanceof Error?e.message:"Biometric authentication is unavailable.");}}}/>} /><Row icon="📱" title="Trusted devices" theme={theme} subtitle="Device recovery architecture"/><Text style={{color:theme.muted}}>Recovery should prioritize device authentication and a user-created recovery PIN; phone OTP is optional rather than the primary identity mechanism.</Text></ScrollView></View>;
 return <View style={s.flex}><Header title={section} onBack={onBack} theme={theme}/><View style={s.empty}><Text style={{color:theme.muted}}>This section is reserved for the next native/service layer.</Text></View></View>}
 
@@ -4573,6 +4276,42 @@ function LoginScreen({
 function AppContent(){
 console.log("[NEXCHAT BOOT 01] AppContent render START");
 const insets=useSafeAreaInsets();const [securityLocked,setSecurityLocked]=useState(false);const biometricPromptRef=useRef(false);const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);
+
+useEffect(()=>{
+  const subscription=BackHandler.addEventListener(
+    "hardwareBackPress",
+    ()=>{
+      if(screen.name==="contact"){
+        setScreen({name:"chat",peerId:screen.peerId});
+        return true;
+      }
+
+      if(screen.name==="settingsSection"){
+        setScreen({name:"settings"});
+        return true;
+      }
+
+      if(screen.name==="myPosts"){
+        setScreen({name:"settingsSection",section:"profile"});
+        return true;
+      }
+
+      if(
+        screen.name==="chat" ||
+        screen.name==="new" ||
+        screen.name==="settings"
+      ){
+        setScreen({name:"home"});
+        return true;
+      }
+
+      return false;
+    },
+  );
+
+  return ()=>subscription.remove();
+},[screen]);
+
 const [accountChecked,setAccountChecked]=useState(false);
 const [authenticated,setAuthenticated]=useState(false);
 const st=useNexChatStore();
@@ -4771,7 +4510,7 @@ useEffect(()=>{
       console.log("[NEXCHAT BOOT 09] isAuthenticated OK", { sessionActive });
 
       setAccountChecked(true);
-      setAuthenticated(accountExists ? sessionActive : true);
+      setAuthenticated(accountExists && sessionActive);
 
       console.log("[NEXCHAT BOOT 10] backup settings START");
       const bs=getPersistedSettingsSnapshot();
@@ -4829,6 +4568,13 @@ useEffect(()=>{
 
   (async()=>{
     try{
+      if(isExpoGo || !Notifications){
+        console.log(
+          "[NexChat notifications] Expo Go detected; native push setup skipped.",
+        );
+        return;
+      }
+
       const permissions =
         await Notifications.getPermissionsAsync();
 
@@ -4868,6 +4614,10 @@ useEffect(()=>{
           screen.name === "chat" &&
           screen.peerId === message.senderId
         ){
+          return;
+        }
+
+        if(!Notifications){
           return;
         }
 
@@ -5045,11 +4795,23 @@ const needsIdentitySetup =
   identity?.displayName === "NexChat User" &&
   identity?.username === "user";if(!splashMinDone||!appReady){return <BootSplash onMinimumDurationElapsed={()=>setSplashMinDone(true)}/>;}
 
-if(startupError){if(!accountChecked){
+if(!accountChecked){
   return <BootSplash onMinimumDurationElapsed={()=>setSplashMinDone(true)}/>;
 }
 
 if(!authenticated){
+  if(identity?.displayName === "NexChat User" && identity?.username === "user"){
+    return (
+      <IdentitySetup
+        theme={theme}
+        onComplete={updated=>{
+          setIdentity(updated);
+          setAuthenticated(true);
+        }}
+      />
+    );
+  }
+
   return (
     <LoginScreen
       theme={theme}
@@ -5058,16 +4820,7 @@ if(!authenticated){
   );
 }
 
-if(identity?.displayName === "NexChat User" && identity?.username === "user"){
-  return (
-    <IdentitySetup
-      theme={theme}
-      onComplete={updated=>setIdentity(updated)}
-    />
-  );
-}
-
-return <View style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/><View style={{flex:1,alignItems:"center",justifyContent:"center",padding:28,gap:14}}><Text style={{fontSize:44}}>⚠️</Text><Text style={{fontSize:19,fontWeight:"900",color:theme.ink,textAlign:"center"}}>NexChat couldn't start</Text><Text style={{color:theme.muted,textAlign:"center"}}>{startupError}</Text><View style={{width:"100%",gap:10,marginTop:10}}><Button label="Try again" onPress={()=>setStartupRetry(k=>k+1)}/><Button label="Reset local vault (this device only)" danger onPress={()=>Alert.alert("Reset local vault?","This permanently deletes all chats, contacts and settings stored on this device. This cannot be undone, and only helps if the vault itself is what's broken.",[{text:"Reset",style:"destructive",onPress:async()=>{try{await clearVault();setStartupRetry(k=>k+1)}catch(e){Alert.alert("Reset failed",e instanceof Error?e.message:"Unable to reset local vault.")}}},{text:"Cancel",style:"cancel"}])}/></View></View></View>}return <View style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/>{securityLocked&&st.settings.biometricLock?<View style={{flex:1,backgroundColor:theme.bg,alignItems:"center",justifyContent:"center",padding:28}}><Text style={{fontSize:52}}>🔒</Text><Text style={{fontSize:22,fontWeight:"900",color:theme.ink,marginTop:14}}>NexChat is locked</Text><Text style={{color:theme.muted,textAlign:"center",marginTop:8}}>Authenticate with your device biometrics to continue.</Text><View style={{width:"100%",marginTop:22}}><Button label="Unlock with biometrics" onPress={async()=>{if(biometricPromptRef.current)return;biometricPromptRef.current=true;try{const unlocked=await authenticateBiometric();if(unlocked)setSecurityLocked(false);}finally{biometricPromptRef.current=false;}}}/></View></View>:<>{body}{screen.name==="home"&&<View style={[s.nav,{backgroundColor:theme.card,borderTopColor:theme.line,paddingBottom:insets.bottom}]}>{(["Chats","Stories","Feed","Calls","Settings"] as Tab[]).map(x=><TouchableOpacity key={x} onPress={()=>x==="Settings"?setScreen({name:"settings"}):setTab(x)} style={s.navItem}><Text style={{fontSize:18,color:theme.ink}}>{x==="Chats"?"💬":x==="Stories"?"◉":x==="Feed"?"▦":x==="Calls"?"📞":"⚙"}</Text><Text style={{fontSize:11,color:tab===x?theme.brand:theme.muted,fontWeight:"800"}}>{x}</Text></TouchableOpacity>)}</View>}{call&&<CallOverlay
+if(startupError){return <View style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/><View style={{flex:1,alignItems:"center",justifyContent:"center",padding:28,gap:14}}><Text style={{fontSize:44}}>⚠️</Text><Text style={{fontSize:19,fontWeight:"900",color:theme.ink,textAlign:"center"}}>NexChat couldn't start</Text><Text style={{color:theme.muted,textAlign:"center"}}>{startupError}</Text><View style={{width:"100%",gap:10,marginTop:10}}><Button label="Try again" onPress={()=>setStartupRetry(k=>k+1)}/><Button label="Reset local vault (this device only)" danger onPress={()=>Alert.alert("Reset local vault?","This permanently deletes all chats, contacts and settings stored on this device. This cannot be undone, and only helps if the vault itself is what's broken.",[{text:"Reset",style:"destructive",onPress:async()=>{try{await clearVault();setStartupRetry(k=>k+1)}catch(e){Alert.alert("Reset failed",e instanceof Error?e.message:"Unable to reset local vault.")}}},{text:"Cancel",style:"cancel"}])}/></View></View></View>}return <View style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/>{securityLocked&&st.settings.biometricLock?<View style={{flex:1,backgroundColor:theme.bg,alignItems:"center",justifyContent:"center",padding:28}}><Text style={{fontSize:52}}>🔒</Text><Text style={{fontSize:22,fontWeight:"900",color:theme.ink,marginTop:14}}>NexChat is locked</Text><Text style={{color:theme.muted,textAlign:"center",marginTop:8}}>Authenticate with your device biometrics to continue.</Text><View style={{width:"100%",marginTop:22}}><Button label="Unlock with biometrics" onPress={async()=>{if(biometricPromptRef.current)return;biometricPromptRef.current=true;try{const unlocked=await authenticateBiometric();if(unlocked)setSecurityLocked(false);}finally{biometricPromptRef.current=false;}}}/></View></View>:<>{body}{screen.name==="home"&&<View style={[s.nav,{backgroundColor:theme.card,borderTopColor:theme.line,paddingBottom:insets.bottom}]}>{(["Chats","Stories","Feed","Calls","Settings"] as Tab[]).map(x=><TouchableOpacity key={x} onPress={()=>x==="Settings"?setScreen({name:"settings"}):setTab(x)} style={s.navItem}><Text style={{fontSize:18,color:theme.ink}}>{x==="Chats"?"💬":x==="Stories"?"◉":x==="Feed"?"▦":x==="Calls"?"📞":"⚙"}</Text><Text style={{fontSize:11,color:tab===x?theme.brand:theme.muted,fontWeight:"800"}}>{x}</Text></TouchableOpacity>)}</View>}{call&&<CallOverlay
   contact={contact}
   video={call.video}
   status={call.status}

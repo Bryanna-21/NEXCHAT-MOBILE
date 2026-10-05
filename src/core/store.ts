@@ -201,7 +201,6 @@ export type AppSettings = {
 
   backupDestination:
     | "device"
-    | "trusted-device"
     | "cloud";
 
   lastBackupRunAt?: string;
@@ -2109,6 +2108,8 @@ export function useNexChatStore() {
                           viewedAt:
                             new Date()
                               .toISOString(),
+                          text: "",
+                          attachment: undefined,
                         }
                       : message
                 ),

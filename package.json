@@ -11,10 +11,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@pdftron/react-native-pdf": "^3.0.4-33",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-native-masked-view/masked-view": "0.3.2",
     "base64-js": "^1.5.1",
     "crypto-js": "^4.2.0",
+    "docx-preview": "^0.4.1",
     "expo": "^57.0.26",
     "expo-asset": "~57.0.18",
     "expo-audio": "~57.0.5",
@@ -34,10 +36,11 @@
     "expo-status-bar": "~57.0.1",
     "expo-updates": "~57.0.24",
     "expo-video": "~57.0.5",
+    "pdfjs-dist": "^6.4.299",
+    "pptx-viewer": "^0.2.2",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.3",
-    "react-native-blob-util": "^0.25.1",
     "react-native-get-random-values": "~1.11.0",
     "react-native-pager-view": "8.0.2",
     "react-native-pdf": "^7.0.5",
@@ -46,7 +49,9 @@
     "react-native-svg": "15.15.4",
     "react-native-view-shot": "5.1.0",
     "react-native-web": "^0.21.0",
-    "tweetnacl": "^1.0.3"
+    "react-native-webview": "13.16.1",
+    "tweetnacl": "^1.0.3",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/react": "~19.2.4",

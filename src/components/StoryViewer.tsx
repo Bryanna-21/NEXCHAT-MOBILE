@@ -12,7 +12,7 @@ import {
 
 import { useEventListener } from "expo";
 import { useVideoPlayer, VideoView } from "expo-video";
-import * as MediaLibrary from "expo-media-library";
+import * as MediaLibrary from "expo-media-library/legacy";
 import * as FileSystem from "expo-file-system/legacy";
 import { captureRef } from "react-native-view-shot";
 

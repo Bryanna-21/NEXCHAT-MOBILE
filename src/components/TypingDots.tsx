@@ -2,46 +2,73 @@ import React, { useEffect, useRef } from "react";
 import { Animated, Easing, StyleSheet, View } from "react-native";
 
 /**
- * Three bouncing dots — a general-purpose "something is in
- * progress" indicator. Used wherever we honestly know an activity
- * is happening (sending a message, a call connecting) — never used
- * to imply a real contact is typing, since this app has no real
- * incoming message flow to back that claim.
+ * NexChat typing indicator.
+ *
+ * Three dots pulse sequentially so the animation communicates
+ * human typing rather than generic loading activity.
+ *
+ * The component is intentionally presentation-only. The actual
+ * typing state comes from the realtime typing event system.
  */
-export function TypingDots({ color, size = 7 }: { color: string; size?: number }) {
-  const values = [useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current];
+export function TypingDots({
+  color,
+  size = 7,
+}: {
+  color: string;
+  size?: number;
+}) {
+  const values = [
+    useRef(new Animated.Value(0)).current,
+    useRef(new Animated.Value(0)).current,
+    useRef(new Animated.Value(0)).current,
+  ];
 
   useEffect(() => {
-    const loops = values.map((value, i) =>
+    const loops = values.map((value, index) =>
       Animated.loop(
         Animated.sequence([
-          Animated.delay(i * 150),
+          Animated.delay(index * 130),
+
           Animated.timing(value, {
             toValue: 1,
-            duration: 350,
+            duration: 280,
             easing: Easing.out(Easing.quad),
             useNativeDriver: true,
           }),
+
           Animated.timing(value, {
             toValue: 0,
-            duration: 350,
+            duration: 280,
             easing: Easing.in(Easing.quad),
             useNativeDriver: true,
           }),
-          Animated.delay((2 - i) * 150),
+
+          Animated.delay(260),
         ])
       )
     );
 
-    loops.forEach((l) => l.start());
-    return () => loops.forEach((l) => l.stop());
-  }, []);
+    loops.forEach((loop) => loop.start());
+
+    return () => {
+      loops.forEach((loop) => loop.stop());
+    };
+  }, [values]);
 
   return (
-    <View style={styles.row}>
-      {values.map((value, i) => (
+    <View
+      style={[
+        styles.row,
+        {
+          minHeight: size + 8,
+        },
+      ]}
+      accessibilityLabel="Contact is typing"
+      accessibilityRole="progressbar"
+    >
+      {values.map((value, index) => (
         <Animated.View
-          key={i}
+          key={index}
           style={[
             styles.dot,
             {
@@ -49,10 +76,24 @@ export function TypingDots({ color, size = 7 }: { color: string; size?: number }
               height: size,
               borderRadius: size / 2,
               backgroundColor: color,
-              opacity: value.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] }),
+
+              opacity: value.interpolate({
+                inputRange: [0, 1],
+                outputRange: [0.25, 1],
+              }),
+
               transform: [
                 {
-                  translateY: value.interpolate({ inputRange: [0, 1], outputRange: [0, -4] }),
+                  translateY: value.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [1, -4],
+                  }),
+                },
+                {
+                  scale: value.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [0.82, 1.12],
+                  }),
                 },
               ],
             },

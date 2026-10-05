@@ -109,7 +109,12 @@ export function QRScanner({
                 Place the contact's QR code inside the frame.
               </Text>
 
-              <View style={styles.frame} />
+              <View style={styles.frame}>
+                <View style={[styles.corner, styles.cornerTopLeft]} />
+                <View style={[styles.corner, styles.cornerTopRight]} />
+                <View style={[styles.corner, styles.cornerBottomLeft]} />
+                <View style={[styles.corner, styles.cornerBottomRight]} />
+              </View>
 
               <TouchableOpacity
                 onPress={onClose}
@@ -180,12 +185,53 @@ const styles = StyleSheet.create({
   },
 
   frame: {
-    width: 260,
-    height: 260,
-    borderWidth: 4,
-    borderColor: "white",
+    width: 280,
+    height: 280,
+    borderWidth: 2,
+    borderColor: "rgba(255,255,255,0.55)",
     borderRadius: 24,
-    marginTop: 60,
+    marginTop: 55,
+    position: "relative",
+    overflow: "hidden",
+  },
+
+  corner: {
+    position: "absolute",
+    width: 34,
+    height: 34,
+    borderColor: "#FFFFFF",
+  },
+
+  cornerTopLeft: {
+    top: -2,
+    left: -2,
+    borderTopWidth: 5,
+    borderLeftWidth: 5,
+    borderTopLeftRadius: 12,
+  },
+
+  cornerTopRight: {
+    top: -2,
+    right: -2,
+    borderTopWidth: 5,
+    borderRightWidth: 5,
+    borderTopRightRadius: 12,
+  },
+
+  cornerBottomLeft: {
+    bottom: -2,
+    left: -2,
+    borderBottomWidth: 5,
+    borderLeftWidth: 5,
+    borderBottomLeftRadius: 12,
+  },
+
+  cornerBottomRight: {
+    bottom: -2,
+    right: -2,
+    borderBottomWidth: 5,
+    borderRightWidth: 5,
+    borderBottomRightRadius: 12,
   },
 
   close: {
