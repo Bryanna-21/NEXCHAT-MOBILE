@@ -1,3 +1,4 @@
+import { Platform } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 
 export interface StoredAttachment {
@@ -17,57 +18,250 @@ export interface StoredAttachment {
 const ROOT =
   `${FileSystem.documentDirectory || FileSystem.cacheDirectory || ""}nexchat-attachments/`;
 
-async function ensureRoot(): Promise<void> {
-  if (!ROOT) {
-    throw new Error(
-      "NexChat attachment storage directory is unavailable.",
-    );
-  }
+const WEB_DB_NAME = "nexchat-attachments";
+const WEB_STORE_NAME = "attachments";
 
-  const info =
-    await FileSystem.getInfoAsync(ROOT);
-
-  if (!info.exists) {
-    await FileSystem.makeDirectoryAsync(
-      ROOT,
-      {
-        intermediates: true,
-      },
-    );
-  }
-}
-
-function sanitize(
-  value: string,
-): string {
+function sanitize(value: string): string {
   return value.replace(
     /[^a-zA-Z0-9._-]/g,
     "_",
   );
 }
 
-function attachmentUri(
-  id: string,
-): string {
+function attachmentUri(id: string): string {
   return `${ROOT}${sanitize(id)}`;
 }
 
-export async function storeAttachment(
+/*
+ * WEB ATTACHMENT STORAGE
+ *
+ * Browser file-picker URIs are blob: URLs and are not durable
+ * across reloads. Store the actual Blob in IndexedDB and create
+ * a fresh object URL whenever the attachment is retrieved.
+ */
+
+function openWebDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(
+      WEB_DB_NAME,
+      1,
+    );
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+
+      if (!db.objectStoreNames.contains(WEB_STORE_NAME)) {
+        db.createObjectStore(WEB_STORE_NAME);
+      }
+    };
+
+    request.onsuccess = () => {
+      resolve(request.result);
+    };
+
+    request.onerror = () => {
+      reject(
+        request.error ||
+          new Error(
+            "Unable to open NexChat web attachment storage.",
+          ),
+      );
+    };
+  });
+}
+
+async function webPut(
+  id: string,
+  blob: Blob,
+): Promise<void> {
+  const db = await openWebDatabase();
+
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(
+      WEB_STORE_NAME,
+      "readwrite",
+    );
+
+    transaction.objectStore(
+      WEB_STORE_NAME,
+    ).put(blob, id);
+
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+
+    transaction.onerror = () => {
+      db.close();
+      reject(
+        transaction.error ||
+          new Error(
+            "Unable to store NexChat web attachment.",
+          ),
+      );
+    };
+  });
+}
+
+async function webGet(
+  id: string,
+): Promise<Blob | null> {
+  const db = await openWebDatabase();
+
+  return new Promise<Blob | null>((resolve, reject) => {
+    const transaction = db.transaction(
+      WEB_STORE_NAME,
+      "readonly",
+    );
+
+    const request =
+      transaction.objectStore(
+        WEB_STORE_NAME,
+      ).get(id);
+
+    request.onsuccess = () => {
+      db.close();
+      resolve(
+        request.result instanceof Blob
+          ? request.result
+          : null,
+      );
+    };
+
+    request.onerror = () => {
+      db.close();
+      reject(
+        request.error ||
+          new Error(
+            "Unable to read NexChat web attachment.",
+          ),
+      );
+    };
+  });
+}
+
+async function webDelete(
+  id: string,
+): Promise<void> {
+  const db = await openWebDatabase();
+
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(
+      WEB_STORE_NAME,
+      "readwrite",
+    );
+
+    transaction.objectStore(
+      WEB_STORE_NAME,
+    ).delete(id);
+
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+
+    transaction.onerror = () => {
+      db.close();
+      reject(
+        transaction.error ||
+          new Error(
+            "Unable to delete NexChat web attachment.",
+          ),
+      );
+    };
+  });
+}
+
+async function webExists(
+  id: string,
+): Promise<boolean> {
+  return (await webGet(id)) !== null;
+}
+
+async function storeWebAttachment(
   attachment: StoredAttachment,
 ): Promise<StoredAttachment> {
-  console.log("[NEXCHAT ATTACHMENT] STORE START", {
-    id: attachment.id,
-    type: attachment.type,
-    uri: attachment.uri,
-    mimeType: attachment.mimeType,
-    size: attachment.size,
-  });
+  console.log(
+    "[NEXCHAT ATTACHMENT] WEB STORE START",
+    {
+      id: attachment.id,
+      uri: attachment.uri,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+    },
+  );
 
-  await ensureRoot();
+  const response = await fetch(
+    attachment.uri,
+  );
 
-  console.log("[NEXCHAT ATTACHMENT] ROOT READY", {
-    root: ROOT,
-  });
+  if (!response.ok) {
+    throw new Error(
+      `Unable to read selected attachment (${response.status}).`,
+    );
+  }
+
+  const blob = await response.blob();
+
+  if (!blob.size) {
+    throw new Error(
+      "Selected attachment is empty.",
+    );
+  }
+
+  await webPut(
+    attachment.id,
+    blob,
+  );
+
+  console.log(
+    "[NEXCHAT ATTACHMENT] WEB STORE COMPLETE",
+    {
+      id: attachment.id,
+      size: blob.size,
+      type: blob.type,
+    },
+  );
+
+  return {
+    ...attachment,
+    /*
+     * The URI is intentionally kept as the current object URL.
+     * getAttachmentUri() can recreate it after reload.
+     */
+    uri: URL.createObjectURL(blob),
+    size:
+      attachment.size ??
+      blob.size,
+    mimeType:
+      attachment.mimeType ||
+      blob.type ||
+      undefined,
+  };
+}
+
+async function storeNativeAttachment(
+  attachment: StoredAttachment,
+): Promise<StoredAttachment> {
+  const root = ROOT;
+
+  if (!root) {
+    throw new Error(
+      "NexChat attachment storage directory is unavailable.",
+    );
+  }
+
+  const info =
+    await FileSystem.getInfoAsync(root);
+
+  if (!info.exists) {
+    await FileSystem.makeDirectoryAsync(
+      root,
+      {
+        intermediates: true,
+      },
+    );
+  }
 
   const destination =
     attachmentUri(attachment.id);
@@ -90,16 +284,22 @@ export async function storeAttachment(
     };
   }
 
-  console.log("[NEXCHAT ATTACHMENT] CHECKING SOURCE", {
-    uri: attachment.uri,
-  });
+  console.log(
+    "[NEXCHAT ATTACHMENT] CHECKING SOURCE",
+    {
+      uri: attachment.uri,
+    },
+  );
 
   const sourceInfo =
     await FileSystem.getInfoAsync(
       attachment.uri,
     );
 
-  console.log("[NEXCHAT ATTACHMENT] SOURCE INFO", sourceInfo);
+  console.log(
+    "[NEXCHAT ATTACHMENT] SOURCE INFO",
+    sourceInfo,
+  );
 
   if (!sourceInfo.exists) {
     throw new Error(
@@ -118,26 +318,35 @@ export async function storeAttachment(
     );
   }
 
-  console.log("[NEXCHAT ATTACHMENT] COPY START", {
-    from: attachment.uri,
-    to: destination,
-  });
+  console.log(
+    "[NEXCHAT ATTACHMENT] COPY START",
+    {
+      from: attachment.uri,
+      to: destination,
+    },
+  );
 
   await FileSystem.copyAsync({
     from: attachment.uri,
     to: destination,
   });
 
-  console.log("[NEXCHAT ATTACHMENT] COPY COMPLETE", {
-    destination,
-  });
+  console.log(
+    "[NEXCHAT ATTACHMENT] COPY COMPLETE",
+    {
+      destination,
+    },
+  );
 
   const copiedInfo =
     await FileSystem.getInfoAsync(
       destination,
     );
 
-  console.log("[NEXCHAT ATTACHMENT] DESTINATION INFO", copiedInfo);
+  console.log(
+    "[NEXCHAT ATTACHMENT] DESTINATION INFO",
+    copiedInfo,
+  );
 
   if (!copiedInfo.exists) {
     throw new Error(
@@ -151,10 +360,37 @@ export async function storeAttachment(
   };
 }
 
+export async function storeAttachment(
+  attachment: StoredAttachment,
+): Promise<StoredAttachment> {
+  console.log(
+    "[NEXCHAT ATTACHMENT] STORE START",
+    {
+      id: attachment.id,
+      type: attachment.type,
+      uri: attachment.uri,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+    },
+  );
+
+  if (Platform.OS === "web") {
+    return storeWebAttachment(
+      attachment,
+    );
+  }
+
+  return storeNativeAttachment(
+    attachment,
+  );
+}
+
 export async function attachmentExists(
   id: string,
 ): Promise<boolean> {
-  await ensureRoot();
+  if (Platform.OS === "web") {
+    return webExists(id);
+  }
 
   const info =
     await FileSystem.getInfoAsync(
@@ -167,13 +403,21 @@ export async function attachmentExists(
 export async function deleteAttachment(
   id: string,
 ): Promise<void> {
-  await ensureRoot();
+  if (Platform.OS === "web") {
+    if (await webExists(id)) {
+      await webDelete(id);
+    }
+
+    return;
+  }
 
   const uri =
     attachmentUri(id);
 
   const info =
-    await FileSystem.getInfoAsync(uri);
+    await FileSystem.getInfoAsync(
+      uri,
+    );
 
   if (info.exists) {
     await FileSystem.deleteAsync(
@@ -185,16 +429,38 @@ export async function deleteAttachment(
   }
 }
 
+export async function getAttachmentBlob(
+  id: string,
+): Promise<Blob | null> {
+  if (Platform.OS !== "web") {
+    return null;
+  }
+
+  return webGet(id);
+}
+
 export async function getAttachmentUri(
   id: string,
 ): Promise<string | null> {
-  await ensureRoot();
+  if (Platform.OS === "web") {
+    const blob = await webGet(id);
+
+    if (!blob) {
+      return null;
+    }
+
+    return URL.createObjectURL(blob);
+  }
 
   const uri =
     attachmentUri(id);
 
   const info =
-    await FileSystem.getInfoAsync(uri);
+    await FileSystem.getInfoAsync(
+      uri,
+    );
 
-  return info.exists ? uri : null;
+  return info.exists
+    ? uri
+    : null;
 }

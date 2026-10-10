@@ -1,12 +1,13 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Dimensions,
+  Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
-import { WebView } from "react-native-webview";
+import { getAttachmentBlob } from "../core/attachmentStore";
 
 type InlineDocumentViewerProps = {
   uri: string;
@@ -84,6 +85,7 @@ function buildViewerHtml(
   kind: string,
   fileName: string,
   fileUri: string,
+  landscape = false,
 ) {
   const safeName = escapeHtml(fileName);
   const encodedUri = JSON.stringify(fileUri);
@@ -127,7 +129,15 @@ body {
   overflow-x: auto;
   overflow-y: hidden;
   scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
   -webkit-overflow-scrolling: touch;
+  touch-action: pan-x;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+#pages::-webkit-scrollbar {
+  display: none;
 }
 
 .page {
@@ -136,12 +146,13 @@ body {
   height: 100%;
   scroll-snap-align: start;
   scroll-snap-stop: always;
-  overflow: auto;
+  overflow: hidden;
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding: 8px;
   background: #222;
+  touch-action: pan-x;
 }
 
 .page-content {
@@ -223,6 +234,7 @@ body {
 <script>
 const FILE_URI = ${encodedUri};
 const KIND = ${JSON.stringify(kind)};
+const LANDSCAPE = ${JSON.stringify(landscape)};
 
 function base64ToBytes(base64) {
   const binary = atob(base64);
@@ -237,6 +249,11 @@ function base64ToBytes(base64) {
 
 async function loadBase64() {
   const response = await fetch(FILE_URI);
+
+  if (!response.ok) {
+    throw new Error("Unable to load document.");
+  }
+
   const buffer = await response.arrayBuffer();
 
   let binary = "";
@@ -271,11 +288,13 @@ function createPage(html, className = "") {
 
 function finish() {
   document.getElementById("status").style.display = "none";
-  window.ReactNativeWebView?.postMessage(
-    JSON.stringify({
-      type: "ready",
-      pages: document.querySelectorAll(".page").length,
-    })
+
+  window.parent.postMessage(
+    {
+      source: "nexchat-document-viewer",
+      type: "loaded",
+    },
+    "*"
   );
 }
 
@@ -285,11 +304,12 @@ function fail(error) {
   document.getElementById("status").innerHTML =
     '<div id="error">This document could not be displayed.</div>';
 
-  window.ReactNativeWebView?.postMessage(
-    JSON.stringify({
+  window.parent.postMessage(
+    {
+      source: "nexchat-document-viewer",
       type: "error",
-      message: String(error?.message || error),
-    })
+    },
+    "*"
   );
 }
 
@@ -309,9 +329,16 @@ async function renderPdf(bytes) {
     const pdfPage = await pdf.getPage(pageNumber);
 
     const baseViewport = pdfPage.getViewport({ scale: 1 });
+
+    const availableWidth =
+      window.innerWidth - 16;
+
+    const availableHeight =
+      window.innerHeight - 16;
+
     const scale = Math.min(
-      (window.innerWidth - 16) / baseViewport.width,
-      (window.innerHeight - 16) / baseViewport.height
+      availableWidth / baseViewport.width,
+      availableHeight / baseViewport.height
     );
 
     const viewport = pdfPage.getViewport({ scale });
@@ -339,9 +366,11 @@ async function renderDocx(bytes) {
   );
 
   const temp = document.createElement("div");
+
   temp.style.position = "absolute";
   temp.style.left = "-100000px";
   temp.style.width = "100%";
+
   document.body.appendChild(temp);
 
   await window.docx.renderAsync(
@@ -357,7 +386,9 @@ async function renderDocx(bytes) {
     }
   );
 
-  const sections = temp.querySelectorAll(".docx-wrapper > section");
+  const sections = temp.querySelectorAll(
+    ".docx-wrapper > section"
+  );
 
   if (!sections.length) {
     createPage(temp.innerHTML);
@@ -441,7 +472,10 @@ async function renderTxt(bytes) {
   for (let i = 0; i < lines.length; i += linesPerPage) {
     const wrapper = document.createElement("div");
     wrapper.className = "text-page";
-    wrapper.textContent = lines.slice(i, i + linesPerPage).join("\\n");
+    wrapper.textContent = lines
+      .slice(i, i + linesPerPage)
+      .join("\\n");
+
     createPage(wrapper);
   }
 
@@ -483,13 +517,142 @@ main();
 
 export default function InlineDocumentViewer({
   uri,
-  id: _id,
+  id,
   name = "Document",
   mimeType = "application/octet-stream",
   theme,
 }: InlineDocumentViewerProps) {
-  const [pages, setPages] = useState(0);
-  const [error, setError] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [documentUri, setDocumentUri] = useState<string | null>(null);
+  const [landscape, setLandscape] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    const blobToDataUrl = (blob: Blob): Promise<string> =>
+      new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onload = () => {
+          if (typeof reader.result !== "string") {
+            reject(
+              new Error(
+                "Unable to convert document for web rendering.",
+              ),
+            );
+            return;
+          }
+
+          resolve(reader.result);
+        };
+
+        reader.onerror = () => {
+          reject(
+            reader.error ||
+              new Error(
+                "Unable to read document for web rendering.",
+              ),
+          );
+        };
+
+        reader.readAsDataURL(blob);
+      });
+
+    const recoverDocument = async () => {
+      try {
+        let blob: Blob | null = null;
+
+        if (id) {
+          blob = await getAttachmentBlob(id);
+        }
+
+        /*
+         * The attachment is stored as a Blob in IndexedDB on web.
+         * Recover that Blob directly instead of creating a blob: URL
+         * and then trying to fetch that URL again.
+         */
+        if (!blob && uri && !uri.startsWith("blob:")) {
+          const response = await fetch(uri);
+
+          if (!response.ok) {
+            throw new Error(
+              `Unable to recover document (${response.status}).`,
+            );
+          }
+
+          blob = await response.blob();
+        }
+
+        if (!blob) {
+          throw new Error(
+            "The stored document could not be recovered.",
+          );
+        }
+
+        const dataUrl = await blobToDataUrl(blob);
+
+        if (active) {
+          console.log(
+            "[NEXCHAT DOCUMENT] WEB RECOVERY COMPLETE",
+            {
+              id,
+              name,
+              mimeType,
+              size: blob.size,
+              type: blob.type,
+            },
+          );
+
+          setDocumentUri(dataUrl);
+          setLoaded(false);
+        }
+      } catch (error) {
+        console.error(
+          "[NEXCHAT DOCUMENT] RECOVERY ERROR",
+          error,
+        );
+
+        if (active) {
+          setDocumentUri(null);
+          setLoaded(true);
+        }
+      }
+    };
+
+    setLoaded(false);
+    recoverDocument();
+
+    return () => {
+      active = false;
+    };
+  }, [id, uri, name, mimeType]);
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      const data = event.data;
+
+      if (
+        !data ||
+        data.source !== "nexchat-document-viewer"
+      ) {
+        return;
+      }
+
+      if (data.type === "loaded") {
+        setLoaded(true);
+      }
+
+      if (data.type === "error") {
+        setLoaded(true);
+      }
+    };
+
+    window.addEventListener("message", handleMessage);
+
+    return () => {
+      window.removeEventListener("message", handleMessage);
+    };
+  }, []);
 
   const kind = useMemo(
     () => getKind(name, mimeType),
@@ -497,8 +660,16 @@ export default function InlineDocumentViewer({
   );
 
   const html = useMemo(
-    () => buildViewerHtml(kind, name, uri),
-    [kind, name, uri],
+    () =>
+      documentUri
+        ? buildViewerHtml(
+            kind,
+            name,
+            documentUri,
+            landscape,
+          )
+        : "",
+    [kind, name, documentUri, landscape],
   );
 
   return (
@@ -528,52 +699,98 @@ export default function InlineDocumentViewer({
           </Text>
 
           <Text style={[styles.hint, { color: theme.muted }]}>
-            {pages > 1
-              ? `Swipe left to continue • Page 1 of ${pages}`
-              : "Swipe left to continue"}
+            Swipe left to continue
           </Text>
+        </View>
+
+        <View style={styles.orientationControls}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Portrait document view"
+            onPress={() => setLandscape(false)}
+            style={[
+              styles.orientationButton,
+              !landscape && {
+                backgroundColor: theme.brand,
+              },
+            ]}
+          >
+            <Text
+              style={[
+                styles.orientationText,
+                {
+                  color: !landscape
+                    ? "#fff"
+                    : theme.muted,
+                },
+              ]}
+            >
+              Portrait
+            </Text>
+          </Pressable>
+
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Landscape document view"
+            onPress={() => setLandscape(true)}
+            style={[
+              styles.orientationButton,
+              landscape && {
+                backgroundColor: theme.brand,
+              },
+            ]}
+          >
+            <Text
+              style={[
+                styles.orientationText,
+                {
+                  color: landscape
+                    ? "#fff"
+                    : theme.muted,
+                },
+              ]}
+            >
+              Landscape
+            </Text>
+          </Pressable>
         </View>
       </View>
 
-      <View style={styles.viewer}>
-        <WebView
-          originWhitelist={["*"]}
-          source={{ html }}
-          javaScriptEnabled={true}
-          domStorageEnabled={true}
-          allowFileAccess={true}
-          allowUniversalAccessFromFileURLs={true}
-          mixedContentMode="always"
-          onMessage={(event) => {
-            try {
-              const message = JSON.parse(event.nativeEvent.data);
-
-              if (message.type === "ready") {
-                setPages(
-                  typeof message.pages === "number"
-                    ? message.pages
-                    : 0,
-                );
-                setError(false);
-              }
-
-              if (message.type === "error") {
-                setError(true);
-              }
-            } catch {
-              // Ignore malformed renderer messages.
-            }
+      <View
+        style={[
+          styles.viewer,
+          landscape && styles.viewerLandscape,
+        ]}
+      >
+        {documentUri ? (
+          <iframe
+            key={`${documentUri}-${landscape ? "landscape" : "portrait"}`}
+            title={name}
+            srcDoc={html}
+          onLoad={() => {
+            // The iframe itself loading is not the same as
+            // the document finishing its rendering.
           }}
-          onError={() => setError(true)}
-          style={styles.webview}
-        />
+            style={{
+              width: "100%",
+              height: "100%",
+              border: "0",
+              display: "block",
+              backgroundColor: "#222",
+            }}
+          />
+        ) : null}
 
-        {!error && pages === 0 ? (
-          <View pointerEvents="none" style={styles.loading}>
+        {!loaded || !documentUri ? (
+          <View
+            pointerEvents="none"
+            style={styles.loading}
+          >
             <ActivityIndicator
               size="large"
               color={theme.brand}
             />
+
             <Text
               style={[
                 styles.loadingText,
@@ -596,23 +813,47 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     overflow: "hidden",
   },
+
   header: {
     minHeight: 54,
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
+
   headerInfo: {
     flex: 1,
+    minWidth: 0,
   },
+
+  orientationControls: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginLeft: 10,
+  },
+
+  orientationButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+
+  orientationText: {
+    fontSize: 12,
+    fontWeight: "700",
+  },
+
   name: {
     fontSize: 15,
     fontWeight: "700",
   },
+
   hint: {
     marginTop: 3,
     fontSize: 12,
   },
+
   viewer: {
     width: "100%",
     height: Math.min(
@@ -621,10 +862,14 @@ const styles = StyleSheet.create({
     ),
     position: "relative",
   },
-  webview: {
-    flex: 1,
-    backgroundColor: "#222",
+
+  viewerLandscape: {
+    height: Math.min(
+      Math.max(SCREEN_WIDTH * 0.62, 420),
+      760,
+    ),
   },
+
   loading: {
     position: "absolute",
     inset: 0,
@@ -632,6 +877,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "rgba(0,0,0,0.08)",
   },
+
   loadingText: {
     marginTop: 8,
     fontSize: 13,

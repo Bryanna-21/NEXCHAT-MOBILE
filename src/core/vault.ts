@@ -1,5 +1,9 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as SecureStore from "expo-secure-store";
+import {
+  getSecureItem,
+  setSecureItem,
+  deleteSecureItem,
+} from "./secureStorage";
 import nacl from "tweetnacl";
 
 const DATA_KEY = "nexchat.vault.data.v2";
@@ -37,7 +41,7 @@ function base64ToBytes(value: string): Uint8Array {
 }
 
 async function getKey(): Promise<Uint8Array> {
-  let encoded = await SecureStore.getItemAsync(KEY_NAME);
+  let encoded = await getSecureItem(KEY_NAME);
 
   if (!encoded) {
     /*
@@ -63,7 +67,7 @@ async function getKey(): Promise<Uint8Array> {
     const key = nacl.randomBytes(nacl.secretbox.keyLength);
     encoded = bytesToBase64(key);
 
-    await SecureStore.setItemAsync(KEY_NAME, encoded, {
+    await setSecureItem(KEY_NAME, encoded, {
       requireAuthentication: false,
     });
   }
@@ -183,7 +187,7 @@ export async function verifyVault(): Promise<boolean> {
 
 export async function clearVault(): Promise<void> {
   await AsyncStorage.removeItem(DATA_KEY);
-  await SecureStore.deleteItemAsync(KEY_NAME);
+  await deleteSecureItem(KEY_NAME);
 }
 
 /**

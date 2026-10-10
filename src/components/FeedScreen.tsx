@@ -32,11 +32,11 @@ import * as MediaLibrary from "expo-media-library/legacy";
 import * as Clipboard from "expo-clipboard";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { WebView } from "react-native-webview";
-import Pdf from "react-native-pdf";
+import FeedPdfViewer from "./FeedPdfViewer";
+import PostMenuModal from "./PostMenuModal";
 
-import {
-} from "../core/linkResolver";
 import { ingestAttachment } from "../core/attachmentIngestion";
+import { getAttachmentBlob, getAttachmentUri } from "../core/attachmentStore";
 import { canUserSeeFeedPost } from "../core/feedAudience";
 import {
   loadRecentFeedSearches,
@@ -1103,6 +1103,56 @@ function FeedPdf({
     setBusy(true);
 
     try {
+        if (Platform.OS === "web") {
+          if (!attachment.id) {
+            throw new Error(
+              "The stored PDF could not be recovered.",
+            );
+          }
+
+          const blob =
+            await getAttachmentBlob(attachment.id);
+
+          if (!blob) {
+            throw new Error(
+              "The stored PDF could not be recovered.",
+            );
+          }
+        const fileName = attachment.name || "NexChat.pdf";
+        const file = new File([blob], fileName, {
+          type: "application/pdf",
+        });
+
+        if (
+          typeof navigator !== "undefined" &&
+          "share" in navigator &&
+          typeof navigator.share === "function" &&
+          (!("canShare" in navigator) ||
+            typeof navigator.canShare !== "function" ||
+            navigator.canShare({ files: [file] }))
+        ) {
+          await navigator.share({
+            title: fileName,
+            files: [file],
+          });
+        } else {
+          const downloadUrl = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+
+          link.href = downloadUrl;
+          link.download = fileName;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+
+          setTimeout(() => {
+            URL.revokeObjectURL(downloadUrl);
+          }, 1000);
+        }
+
+        return;
+      }
+
       if (!(await Sharing.isAvailableAsync())) {
         Alert.alert(
           "Sharing unavailable",
@@ -1225,19 +1275,14 @@ function FeedPdf({
             </Pressable>
           </View>
         ) : attachment.uri ? (
-          <Pdf
-            source={{
-              uri: attachment.uri,
-              cache: false,
-            }}
+          <FeedPdfViewer
+            uri={attachment.uri}
             style={styles.pdfInlineNativeViewer}
-            enablePaging={true}
-            horizontal={true}
-            fitPolicy={0}
-            page={1}
             onLoadComplete={handlePdfLoadComplete}
             onPageChanged={handlePdfPageChanged}
             onError={handlePdfError}
+            theme={theme}
+            name={attachment.name || "PDF document"}
           />
         ) : (
           <View style={styles.pdfErrorState}>
@@ -1330,6 +1375,7 @@ function FeedFile({
   if (isInlineDocument && attachment.uri) {
     return (
       <InlineDocumentViewer
+        id={attachment.id}
         uri={attachment.uri}
         name={fileName}
         mimeType={mimeType}
@@ -3333,23 +3379,15 @@ export function FeedScreen({
 
       </View>
 
-      <Modal
+      <PostMenuModal
         visible={!!postMenuPost}
-        animationType="fade"
-        transparent
         onRequestClose={closePostMenu}
+        backdropStyle={styles.postMenuBackdrop}
+        cardStyle={[
+          styles.postMenuCard,
+          { backgroundColor: theme.card },
+        ]}
       >
-        <Pressable
-          style={styles.postMenuBackdrop}
-          onPress={closePostMenu}
-        >
-          <Pressable
-            style={[
-              styles.postMenuCard,
-              { backgroundColor: theme.card },
-            ]}
-            onPress={(event) => event.stopPropagation()}
-          >
             <View style={styles.postMenuHandle} />
 
             <Text
@@ -3606,9 +3644,7 @@ export function FeedScreen({
                 Cancel
               </Text>
             </Pressable>
-          </Pressable>
-        </Pressable>
-      </Modal>
+      </PostMenuModal>
 
       <Modal
         visible={!!audiencePost}

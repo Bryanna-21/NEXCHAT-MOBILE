@@ -1,6 +1,10 @@
 import * as Crypto from "expo-crypto";
 import * as LocalAuthentication from "expo-local-authentication";
-import * as SecureStore from "expo-secure-store";
+import {
+  getSecureItem,
+  setSecureItem,
+  deleteSecureItem,
+} from "./secureStorage";
 import nacl from "tweetnacl";
 
 const PASSCODE_HASH_KEY = "nexchat.security.passcode.hash.v1";
@@ -163,11 +167,11 @@ export async function setPasscode(passcode: string): Promise<void> {
     bytesToBase64(derived),
   ].join(":");
 
-  await SecureStore.setItemAsync(PASSCODE_HASH_KEY, stored);
+  await setSecureItem(PASSCODE_HASH_KEY, stored);
 }
 
 export async function verifyPasscode(passcode: string): Promise<boolean> {
-  const stored = await SecureStore.getItemAsync(PASSCODE_HASH_KEY);
+  const stored = await getSecureItem(PASSCODE_HASH_KEY);
   if (!stored) return false;
 
   // Current Expo Go-compatible format.
@@ -191,7 +195,7 @@ export async function verifyPasscode(passcode: string): Promise<boolean> {
         bytesToBase64(derived),
       ].join(":");
 
-      await SecureStore.setItemAsync(PASSCODE_HASH_KEY, upgraded);
+      await setSecureItem(PASSCODE_HASH_KEY, upgraded);
     }
 
     return matches;
@@ -203,11 +207,11 @@ export async function verifyPasscode(passcode: string): Promise<boolean> {
 }
 
 export async function hasPasscode(): Promise<boolean> {
-  return (await SecureStore.getItemAsync(PASSCODE_HASH_KEY)) !== null;
+  return (await getSecureItem(PASSCODE_HASH_KEY)) !== null;
 }
 
 export async function clearPasscode(): Promise<void> {
-  await SecureStore.deleteItemAsync(PASSCODE_HASH_KEY);
+  await deleteSecureItem(PASSCODE_HASH_KEY);
 }
 
 async function createRecoveryCode(): Promise<string> {
@@ -221,11 +225,11 @@ async function createRecoveryCode(): Promise<string> {
 }
 
 export async function getRecoveryCode(): Promise<string> {
-  let code = await SecureStore.getItemAsync(RECOVERY_KEY);
+  let code = await getSecureItem(RECOVERY_KEY);
 
   if (!code) {
     code = await createRecoveryCode();
-    await SecureStore.setItemAsync(RECOVERY_KEY, code);
+    await setSecureItem(RECOVERY_KEY, code);
   }
 
   return code;
@@ -235,7 +239,7 @@ export async function resetPasscodeWithRecovery(
   recovery: string,
   newPasscode: string
 ): Promise<boolean> {
-  const stored = await SecureStore.getItemAsync(RECOVERY_KEY);
+  const stored = await getSecureItem(RECOVERY_KEY);
 
   if (!stored || stored.toUpperCase() !== recovery.trim().toUpperCase()) {
     return false;
@@ -246,7 +250,7 @@ export async function resetPasscodeWithRecovery(
 }
 
 export async function isBiometricEnabled(): Promise<boolean> {
-  const value = await SecureStore.getItemAsync(BIOMETRIC_KEY);
+  const value = await getSecureItem(BIOMETRIC_KEY);
   return value === "true";
 }
 
@@ -260,7 +264,7 @@ export async function setBiometricEnabled(enabled: boolean): Promise<void> {
     }
   }
 
-  await SecureStore.setItemAsync(BIOMETRIC_KEY, enabled ? "true" : "false");
+  await setSecureItem(BIOMETRIC_KEY, enabled ? "true" : "false");
 }
 
 export async function authenticateBiometric(): Promise<boolean> {

@@ -53,14 +53,18 @@ import MyPostViewer from "./src/components/MyPostViewer";
 import {FeedPost,getFeedFollowCounts,loadFeedPosts,loadHiddenFeedPostIds,setFeedPostHidden} from "./src/core/feed";
 import {PasscodeManager} from "./src/components/PasscodeManager";
 
+const isWeb = Platform.OS === "web";
+
 const isExpoGo =
-  Constants.executionEnvironment === Constants.ExecutionEnvironment.StoreClient;
+  !isWeb &&
+  Constants.executionEnvironment ===
+    Constants.ExecutionEnvironment?.StoreClient;
 
 let Notifications:
   | typeof import("expo-notifications")
   | null = null;
 
-if (!isExpoGo) {
+if (!isWeb && !isExpoGo) {
   const nativeNotifications = require("expo-notifications");
   Notifications = nativeNotifications;
 

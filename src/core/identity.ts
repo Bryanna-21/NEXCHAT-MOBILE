@@ -1,6 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Crypto from "expo-crypto";
-import * as SecureStore from "expo-secure-store";
+import { getSecureItem, setSecureItem } from "./secureStorage";
 import nacl from "tweetnacl";
 
 export type Identity = {
@@ -45,7 +45,7 @@ function base64ToBytes(value: string): Uint8Array {
 
 async function ensureMessagingKeyPair(): Promise<string> {
   const existingPrivateKey =
-    await SecureStore.getItemAsync(PRIVATE_KEY);
+    await getSecureItem(PRIVATE_KEY);
 
   if (existingPrivateKey) {
     const privateKey = base64ToBytes(existingPrivateKey);
@@ -62,7 +62,7 @@ async function ensureMessagingKeyPair(): Promise<string> {
 
   const keyPair = nacl.box.keyPair();
 
-  await SecureStore.setItemAsync(
+  await setSecureItem(
     PRIVATE_KEY,
     bytesToBase64(keyPair.secretKey),
     {
@@ -170,7 +170,7 @@ export async function getMessagingKeyPair(): Promise<{
 }> {
   await initIdentity();
 
-  const encoded = await SecureStore.getItemAsync(PRIVATE_KEY);
+  const encoded = await getSecureItem(PRIVATE_KEY);
 
   if (!encoded) {
     throw new Error(

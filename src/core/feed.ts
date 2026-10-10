@@ -30,6 +30,7 @@ export type FeedCreator = {
 };
 
 export type FeedAttachment = {
+  id?: string;
   uri: string;
   name?: string;
   mimeType?: string;
@@ -151,10 +152,21 @@ function createId(prefix: string): string {
 function normalizeAttachment(
   attachment?: FeedAttachment,
 ): FeedAttachment | undefined {
-  if (!attachment?.uri) return undefined;
+  if (!attachment) return undefined;
+
+  /*
+   * Web attachment URIs are blob: URLs and are intentionally
+   * not durable across browser reloads. A durable attachment
+   * id is enough for the web viewer to recover the real Blob
+   * from IndexedDB.
+   */
+  if (!attachment.uri && !attachment.id) {
+    return undefined;
+  }
 
   return {
-    uri: attachment.uri,
+    id: attachment.id,
+    uri: attachment.uri || "",
     name: attachment.name,
     mimeType: attachment.mimeType,
     size: attachment.size,
