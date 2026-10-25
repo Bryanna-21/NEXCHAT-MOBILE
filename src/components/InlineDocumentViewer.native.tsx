@@ -375,7 +375,7 @@ async function renderDocx(bytes) {
 
 async function renderXlsx(bytes) {
   const XLSX = await import(
-    "https://cdn.sheetjs.com/xlsx-0.18.5/package/xlsx.mjs"
+    "https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs"
   );
 
   const workbook = XLSX.read(bytes, {

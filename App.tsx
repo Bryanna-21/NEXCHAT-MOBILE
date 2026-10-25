@@ -14,6 +14,7 @@ import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import * as DocumentPicker from "expo-document-picker";
 import Constants from "expo-constants";
+import * as Updates from "expo-updates";
 import {initIdentity,getIdentity,Identity,updateIdentity} from "./src/core/identity";
 import {
   createAccount,
@@ -4278,6 +4279,8 @@ function LoginScreen({
 }
 
 function AppContent(){
+const [otaUpdatePending,setOtaUpdatePending]=useState(false);
+const otaReloadingRef=useRef(false);
 console.log("[NEXCHAT BOOT 01] AppContent render START");
 const insets=useSafeAreaInsets();const [securityLocked,setSecurityLocked]=useState(false);const biometricPromptRef=useRef(false);const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);
 
@@ -4773,6 +4776,79 @@ useEffect(()=>{
 },[call?.id,call?.status]);
 
 const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)} onDeleted={()=>setScreen({name:"home"})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})} onOpenMyPosts={()=>setScreen({name:"myPosts"})}/>;if(screen.name==="myPosts")return <MyPostsScreen theme={theme} identity={identity} onBack={()=>setScreen({name:"settingsSection",section:"profile"})}/>;switch(tab){case"Chats":return <ChatListScreen theme={theme} identity={identity} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme} onStartCall={beginCall}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <StoriesScreen theme={theme} identity={identity}/>;default:return <FeedScreen theme={theme} identity={identity}/>}},[screen,tab,theme,st]);const appReady=identity!==null||startupError!==null;
+
+// OTA checks must never block NexChat's identity, vault, or chat startup.
+useEffect(()=>{
+  if(Platform.OS==="web" || __DEV__ || !Updates.isEnabled){
+    return;
+  }
+
+  let cancelled=false;
+
+  (async()=>{
+    try{
+      console.log("[NEXCHAT OTA] Checking for updates");
+      const check=await Updates.checkForUpdateAsync();
+
+      if(cancelled || !check.isAvailable){
+        console.log("[NEXCHAT OTA] No compatible update available");
+        return;
+      }
+
+      console.log("[NEXCHAT OTA] Downloading compatible update");
+      const result=await Updates.fetchUpdateAsync();
+
+      if(!cancelled && result.isNew){
+        console.log("[NEXCHAT OTA] Update downloaded; waiting for a safe reload");
+        setOtaUpdatePending(true);
+      }
+    }catch(error){
+      // A failed update check must never prevent normal app startup.
+      console.warn("[NEXCHAT OTA] Update check failed; continuing normally",error);
+    }
+  })();
+
+  return ()=>{cancelled=true;};
+},[]);
+
+// Apply a downloaded update only when the app is ready, at home, and not in a call.
+useEffect(()=>{
+  if(
+    !otaUpdatePending ||
+    !appReady ||
+    call ||
+    screen.name!=="home" ||
+    Platform.OS==="web" ||
+    __DEV__ ||
+    !Updates.isEnabled
+  ){
+    return;
+  }
+
+  const applyIfSafe=(nextState: string | null)=>{
+    if(
+      nextState!=="active" ||
+      otaReloadingRef.current
+    ){
+      return;
+    }
+
+    otaReloadingRef.current=true;
+
+    Updates.reloadAsync().catch(error=>{
+      otaReloadingRef.current=false;
+      console.warn("[NEXCHAT OTA] Could not activate update yet",error);
+    });
+  };
+
+  applyIfSafe(AppState.currentState);
+
+  const subscription=AppState.addEventListener("change",nextState=>{
+    applyIfSafe(nextState);
+  });
+
+  return ()=>subscription.remove();
+},[otaUpdatePending,appReady,call,screen.name]);
 
 
 useEffect(()=>{
