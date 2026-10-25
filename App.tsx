@@ -26,7 +26,7 @@ import {
 } from "./src/core/account";
 import {initVault,verifyVault,getVaultSize,clearVault} from "./src/core/vault";
 import {createBackupSnapshot,restoreFromBackup,exportBackupToFile,importBackupFromFile} from "./src/core/backup";
-import {useNexChatStore,Attachment,Conversation,NexContact,Message,MessageStatus,CallHistoryEntry,getPersistedSettingsSnapshot,initializeNetworkTransport} from "./src/core/store";
+import {useNexChatStore,Attachment,Conversation,NexContact,Message,MessageStatus,CallHistoryEntry,getPersistedSettingsSnapshot,initializeLocalTransportState,startNetworkTransport} from "./src/core/store";
 import {shouldRunBackup,runBackup} from "./src/core/backupScheduler";
 import {MediaPicker} from "./src/components/MediaPicker";
 import {QRScanner} from "./src/components/QRScanner";
@@ -38,6 +38,10 @@ import {MediaPreview} from "./src/components/MediaPreview";
 import {themes} from "./src/theme/theme";
 import {StoriesScreen} from "./src/components/StoriesScreen";
 import {BootSplash} from "./src/components/BootSplash";
+import * as SplashScreen from "expo-splash-screen";
+import {useBackInterceptor} from "./src/core/useBackInterceptor";
+import {resolveBack,runBackInterceptors,type Tab,type Screen,type AppPhase,type BackContext} from "./src/core/backHandling";
+import {createEssentialStartup,runBackground,selectRootView,toFailure,type StartupPhase,type StartupFailure} from "./src/core/startup";
 import {ActionSheet, ActionSheetOption} from "./src/components/ActionSheet";
 import {ChatListScreen} from "./src/components/ChatListScreen";
 import {TypingDots} from "./src/components/TypingDots";
@@ -79,8 +83,9 @@ if (!isWeb && !isExpoGo) {
   });
 }
 
-type Tab="Chats"|"Stories"|"Feed"|"Calls"|"Settings";
-type Screen={name:"home"}|{name:"chat";peerId:string}|{name:"new"}|{name:"contact";peerId:string}|{name:"settings"}|{name:"settingsSection";section:string}|{name:"myPosts"};
+// Keep the (black) native splash up until the first JS frame has been drawn,
+// so there is no unstyled window between native launch and the in-app splash.
+SplashScreen.preventAutoHideAsync().catch(()=>{});
 const icon=(x:string)=><Text style={{fontSize:19}}>{x}</Text>;
 
 function Button({label,onPress,secondary=false,danger=false,theme}:{label:string;onPress:()=>void;secondary?:boolean;danger?:boolean;theme?:any}){
@@ -190,6 +195,25 @@ function NewMessage({
     }>
   >([]);
   const [searching, setSearching] = useState(false);
+
+  // Back must neither send nor silently discard what the user has typed.
+  const hasDraft =
+    id.trim().length > 0 || text.trim().length > 0 || media.length > 0;
+  const requestBack = () => {
+    if (!hasDraft) {
+      onBack();
+      return;
+    }
+    Alert.alert(
+      "Discard message?",
+      "You have an unsent message. Going back will discard it.",
+      [
+        { text: "Keep editing", style: "cancel" },
+        { text: "Discard", style: "destructive", onPress: onBack },
+      ],
+    );
+  };
+  useBackInterceptor(hasDraft, requestBack);
 
   const searchDirectory = async () => {
     const query = searchQuery.trim();
@@ -425,7 +449,7 @@ function NewMessage({
       <Header
         title="New message"
         subtitle="One contact = one conversation"
-        onBack={onBack}
+        onBack={requestBack}
         theme={theme}
       />
 
@@ -3363,11 +3387,10 @@ function CallOverlay({
     <Modal
       transparent
       visible
-      onRequestClose={
-        incoming
-          ? onDecline
-          : onEnd
-      }
+      onRequestClose={() => {
+        // Android Back must never hang up or decline a call by accident.
+        // Use the explicit End / Decline controls.
+      }}
     >
       <View style={s.callOverlay}>
         <View
@@ -4278,48 +4301,29 @@ function LoginScreen({
   );
 }
 
+function StartupErrorScreen({theme,mode,failure,onRetry,onResetVault}:{theme:any;mode:string;failure:StartupFailure;onRetry:()=>void;onResetVault:()=>Promise<void>}){
+  return <View style={[s.safe,{backgroundColor:theme.bg}]}>
+    <StatusBar barStyle={mode==="light"?"dark-content":"light-content"} backgroundColor={theme.bg}/>
+    <View style={{flex:1,alignItems:"center",justifyContent:"center",padding:28,gap:14}}>
+      <Text style={{fontSize:44}}>⚠️</Text>
+      <Text style={{fontSize:19,fontWeight:"900",color:theme.ink,textAlign:"center"}}>NexChat couldn't start</Text>
+      <Text style={{color:theme.muted,textAlign:"center"}}>{failure.message}</Text>
+      <Text style={{color:theme.muted,textAlign:"center",fontSize:12}}>Stage: {failure.stage}{failure.timedOut?" (timed out)":""}. Your chats and keys have not been changed.</Text>
+      <View style={{width:"100%",gap:10,marginTop:10}}>
+        <Button label="Try again" onPress={onRetry}/>
+        <Button label="Reset local vault (this device only)" danger onPress={()=>Alert.alert("Reset local vault?","This permanently deletes all chats, contacts and settings stored on this device. This cannot be undone, and only helps if the vault itself is what's broken.",[{text:"Reset",style:"destructive",onPress:async()=>{try{await onResetVault()}catch(e){Alert.alert("Reset failed",e instanceof Error?e.message:"Unable to reset local vault.")}}},{text:"Cancel",style:"cancel"}])}/>
+      </View>
+    </View>
+  </View>;
+}
+
 function AppContent(){
 const [otaUpdatePending,setOtaUpdatePending]=useState(false);
 const otaReloadingRef=useRef(false);
 console.log("[NEXCHAT BOOT 01] AppContent render START");
 const insets=useSafeAreaInsets();const [securityLocked,setSecurityLocked]=useState(false);const biometricPromptRef=useRef(false);const [tab,setTab]=useState<Tab>("Chats");const [screen,setScreen]=useState<Screen>({name:"home"});const [identity,setIdentity]=useState<Identity|null>(null);
 
-useEffect(()=>{
-  const subscription=BackHandler.addEventListener(
-    "hardwareBackPress",
-    ()=>{
-      if(screen.name==="contact"){
-        setScreen({name:"chat",peerId:screen.peerId});
-        return true;
-      }
 
-      if(screen.name==="settingsSection"){
-        setScreen({name:"settings"});
-        return true;
-      }
-
-      if(screen.name==="myPosts"){
-        setScreen({name:"settingsSection",section:"profile"});
-        return true;
-      }
-
-      if(
-        screen.name==="chat" ||
-        screen.name==="new" ||
-        screen.name==="settings"
-      ){
-        setScreen({name:"home"});
-        return true;
-      }
-
-      return false;
-    },
-  );
-
-  return ()=>subscription.remove();
-},[screen]);
-
-const [accountChecked,setAccountChecked]=useState(false);
 const [authenticated,setAuthenticated]=useState(false);
 const st=useNexChatStore();
 
@@ -4474,101 +4478,91 @@ const declineCall = async () => {
   await finishCall("declined");
 };
 
-const [startupError,setStartupError]=useState<string|null>(null);
+const [startupPhase,setStartupPhase]=useState<StartupPhase>("booting");
+const [startupFailure,setStartupFailure]=useState<StartupFailure|null>(null);
 const [startupRetry,setStartupRetry]=useState(0);
 const [splashMinDone,setSplashMinDone]=useState(false);
+const stRef=useRef(st);stRef.current=st;
+const backgroundStartedRef=useRef(false);
+type StartupController=ReturnType<typeof createEssentialStartup<Identity>>;
+const startupRef=useRef<StartupController|null>(null);
+if(!startupRef.current){
+  startupRef.current=createEssentialStartup<Identity>({
+    initIdentity:()=>initIdentity(),
+    initVault:()=>initVault(),
+    hydrate:()=>stRef.current.hydrate(),
+    initLocalTransportState:()=>initializeLocalTransportState(),
+    getIdentity:()=>getIdentity(),
+    hasAccount:()=>hasAccount(),
+    isAuthenticated:()=>isAuthenticated(),
+  },{
+    onStage:e=>{
+      if(e.status==="start")console.log(`[NEXCHAT BOOT] ${e.stage} START`);
+      else if(e.status==="ok")console.log(`[NEXCHAT BOOT] ${e.stage} OK ${e.ms}ms`);
+      else console.error(`[NEXCHAT BOOT] ${e.stage} FAILED ${e.ms}ms: ${e.error}`);
+    },
+  });
+}
 
 useEffect(()=>{
-  console.log("[NEXCHAT BOOT 02] Startup effect ENTER", { startupRetry });
+  let mounted=true;
+  setStartupPhase("booting");
+  setStartupFailure(null);
 
-  (async()=>{
-    try{
-      console.log("[NEXCHAT BOOT 03] initIdentity START");
-      await initIdentity();
-      console.log("[NEXCHAT BOOT 03] initIdentity OK");
+  // Single flight: a retry while a run is pending shares that run.
+  startupRef.current!.run().then(result=>{
+    if(!mounted)return;
+    setIdentity(result.identity);
+    setAuthenticated(result.accountExists&&result.sessionActive);
+    setStartupPhase("ready");
 
-      console.log("[NEXCHAT BOOT 04] initVault START");
-      await initVault();
-      console.log("[NEXCHAT BOOT 04] initVault OK");
+    // Non-essential work: runs after the app is usable, is time-bounded,
+    // never throws into the UI, and is started at most once per process.
+    if(backgroundStartedRef.current)return;
+    backgroundStartedRef.current=true;
 
-      console.log("[NEXCHAT BOOT 05] store.hydrate START");
-      await st.hydrate();
-      console.log("[NEXCHAT BOOT 05] store.hydrate OK");
+    void runBackground("transport.network",()=>startNetworkTransport(),{
+      timeoutMs:30000,
+      onError:(name,f)=>console.warn(`[NEXCHAT BOOT] background ${name} failed: ${f.message}`),
+    });
 
-      console.log("[NEXCHAT BOOT 06] initializeNetworkTransport START");
-      await initializeNetworkTransport();
-      console.log("[NEXCHAT BOOT 06] initializeNetworkTransport OK");
-
-      console.log("[NEXCHAT BOOT 07] getIdentity START");
-      const restoredIdentity = await getIdentity();
-      console.log("[NEXCHAT BOOT 07] getIdentity OK", {
-        id: restoredIdentity?.id,
-        username: restoredIdentity?.username,
-        displayName: restoredIdentity?.displayName,
-      });
-      setIdentity(restoredIdentity);
-
-      console.log("[NEXCHAT BOOT 08] hasAccount START");
-      const accountExists=await hasAccount();
-      console.log("[NEXCHAT BOOT 08] hasAccount OK", { accountExists });
-
-      console.log("[NEXCHAT BOOT 09] isAuthenticated START");
-      const sessionActive=await isAuthenticated();
-      console.log("[NEXCHAT BOOT 09] isAuthenticated OK", { sessionActive });
-
-      setAccountChecked(true);
-      setAuthenticated(accountExists && sessionActive);
-
-      console.log("[NEXCHAT BOOT 10] backup settings START");
+    void runBackground("backup.scheduled",async()=>{
       const bs=getPersistedSettingsSnapshot();
       const cfg={
         enabled:bs.backupEnabled,
         schedule:bs.backupSchedule,
         destination:bs.backupDestination
       };
-
-      console.log("[NEXCHAT BOOT 10] backup settings OK", {
-        enabled: cfg.enabled,
-        schedule: cfg.schedule,
-        destination: cfg.destination,
-      });
-
-      if(shouldRunBackup(cfg,bs.lastBackupRunAt??null)){
-        console.log("[NEXCHAT BOOT 11] runBackup START");
-        const result=await runBackup(cfg);
-        console.log("[NEXCHAT BOOT 11] runBackup OK", {
-          success: result.success,
-          error: result.error,
-        });
-
-        await st.updateSettings(
-          result.success
-            ? {
-                lastBackupRunAt:result.startedAt,
-                lastBackupAttemptAt:result.startedAt,
-                lastBackupError:undefined
-              }
-            : {
-                lastBackupAttemptAt:result.startedAt,
-                lastBackupError:result.error
-              }
-        );
-      }else{
-        console.log("[NEXCHAT BOOT 11] runBackup SKIPPED");
-      }
-
-      setStartupError(null);
-      console.log("[NEXCHAT BOOT 12] STARTUP COMPLETE");
-    }catch(e){
-      console.error("[NEXCHAT BOOT FAILED]", e);
-      setStartupError(
-        e instanceof Error
-          ? e.message
-          : "NexChat failed to start for an unknown reason."
+      if(!shouldRunBackup(cfg,bs.lastBackupRunAt??null))return;
+      const res=await runBackup(cfg);
+      await stRef.current.updateSettings(
+        res.success
+          ?{lastBackupRunAt:res.startedAt,lastBackupAttemptAt:res.startedAt,lastBackupError:undefined}
+          :{lastBackupAttemptAt:res.startedAt,lastBackupError:res.error}
       );
-    }
-  })();
+    },{
+      timeoutMs:120000,
+      onError:(name,f)=>{
+        console.warn(`[NEXCHAT BOOT] background ${name} failed: ${f.message}`);
+        void stRef.current.updateSettings({lastBackupAttemptAt:new Date().toISOString(),lastBackupError:f.message}).catch(()=>{});
+      },
+    });
+  },e=>{
+    if(!mounted)return;
+    const f=toFailure(e);
+    console.error(`[NEXCHAT BOOT FAILED] stage=${f.stage} timedOut=${f.timedOut} ${f.message}`);
+    setStartupFailure(f);
+    setStartupPhase("failed");
+  });
+
+  return()=>{mounted=false;};
 },[startupRetry]);
+
+// Hand off from the native splash to the in-app splash after first JS frame.
+useEffect(()=>{
+  const id=requestAnimationFrame(()=>{SplashScreen.hideAsync().catch(()=>{});});
+  return()=>cancelAnimationFrame(id);
+},[]);
 
 useEffect(()=>{
   let mounted=true;
@@ -4775,7 +4769,7 @@ useEffect(()=>{
   return()=>clearTimeout(timeout);
 },[call?.id,call?.status]);
 
-const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)} onDeleted={()=>setScreen({name:"home"})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})} onOpenMyPosts={()=>setScreen({name:"myPosts"})}/>;if(screen.name==="myPosts")return <MyPostsScreen theme={theme} identity={identity} onBack={()=>setScreen({name:"settingsSection",section:"profile"})}/>;switch(tab){case"Chats":return <ChatListScreen theme={theme} identity={identity} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme} onStartCall={beginCall}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <StoriesScreen theme={theme} identity={identity}/>;default:return <FeedScreen theme={theme} identity={identity}/>}},[screen,tab,theme,st]);const appReady=identity!==null||startupError!==null;
+const mode=st.settings.theme==="system"?"light":st.settings.theme;const theme=themes[mode as keyof typeof themes]||themes.light;const contact=call?st.contacts.find(c=>c.id===call.peerId):undefined;const body=useMemo(()=>{if(screen.name==="chat")return <Chat peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"home"})} onInfo={()=>setScreen({name:"contact",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)}/>;if(screen.name==="new")return <NewMessage theme={theme} onBack={()=>setScreen({name:"home"})} onOpen={id=>setScreen({name:"chat",peerId:id})}/>;if(screen.name==="contact")return <ContactInfo peerId={screen.peerId} theme={theme} onBack={()=>setScreen({name:"chat",peerId:screen.peerId})} onCall={()=>beginCall(screen.peerId,false)} onVideo={()=>beginCall(screen.peerId,true)} onDeleted={()=>setScreen({name:"home"})}/>;if(screen.name==="settings")return <Settings theme={theme} onBack={()=>setScreen({name:"home"})} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;if(screen.name==="settingsSection")return <SettingSection section={screen.section} theme={theme} onBack={()=>setScreen({name:"settings"})} onOpenMyPosts={()=>setScreen({name:"myPosts"})}/>;if(screen.name==="myPosts")return <MyPostsScreen theme={theme} identity={identity} onBack={()=>setScreen({name:"settingsSection",section:"profile"})}/>;switch(tab){case"Chats":return <ChatListScreen theme={theme} identity={identity} onOpen={id=>setScreen({name:"chat",peerId:id})} onNew={()=>setScreen({name:"new"})}/>;case"Calls":return <Calls theme={theme} onStartCall={beginCall}/>;case"Settings":return <Settings theme={theme} onBack={()=>setTab("Chats")} onSection={s=>setScreen({name:"settingsSection",section:s})}/>;case"Stories":return <StoriesScreen theme={theme} identity={identity}/>;default:return <FeedScreen theme={theme} identity={identity}/>}},[screen,tab,theme,st]);
 
 // OTA checks must never block NexChat's identity, vault, or chat startup.
 useEffect(()=>{
@@ -4815,7 +4809,7 @@ useEffect(()=>{
 useEffect(()=>{
   if(
     !otaUpdatePending ||
-    !appReady ||
+    startupPhase !== "ready" ||
     call ||
     screen.name!=="home" ||
     Platform.OS==="web" ||
@@ -4848,7 +4842,7 @@ useEffect(()=>{
   });
 
   return ()=>subscription.remove();
-},[otaUpdatePending,appReady,call,screen.name]);
+},[otaUpdatePending,startupPhase,call,screen.name]);
 
 
 useEffect(()=>{
@@ -4871,13 +4865,31 @@ useEffect(()=>{
 
   return()=>subscription.remove();
 },[securityLocked,st.settings.biometricLock]);
+const rootView=selectRootView({phase:startupPhase,splashMinDone,authenticated});
+const appPhase:AppPhase=rootView==="error"?"failed":rootView==="splash"?"booting":rootView==="auth"?"auth":"ready";
+const backCtxRef=useRef<BackContext>({phase:"booting",locked:false,callActive:false,screen:{name:"home"},tab:"Chats"});
+backCtxRef.current={phase:appPhase,locked:securityLocked&&st.settings.biometricLock,callActive:call!==null,screen,tab};
+// Exactly one hardware-Back subscription for the app's lifetime. It reads the
+// latest state through a ref, so it can never act on a stale closure.
+useEffect(()=>{
+  const subscription=BackHandler.addEventListener("hardwareBackPress",()=>{
+    const ctx=backCtxRef.current;
+    if(ctx.phase==="ready"&&!ctx.locked&&!ctx.callActive&&runBackInterceptors())return true;
+    const action=resolveBack(ctx);
+    switch(action.kind){
+      case "screen":setScreen(action.screen);return true;
+      case "tab":setTab(action.tab);return true;
+      case "consume":return true;
+      default:return false;
+    }
+  });
+  return()=>subscription.remove();
+},[]);
 const needsIdentitySetup =
   identity?.displayName === "NexChat User" &&
-  identity?.username === "user";if(!splashMinDone||!appReady){return <BootSplash onMinimumDurationElapsed={()=>setSplashMinDone(true)}/>;}
+  identity?.username === "user";if(rootView==="error"&&startupFailure){return <StartupErrorScreen theme={theme} mode={mode} failure={startupFailure} onRetry={()=>{if(startupRef.current?.busy)return;setStartupRetry(k=>k+1);}} onResetVault={async()=>{await clearVault();startupRef.current?.reset();setStartupRetry(k=>k+1);}}/>;}
 
-if(!accountChecked){
-  return <BootSplash onMinimumDurationElapsed={()=>setSplashMinDone(true)}/>;
-}
+if(rootView==="splash"||rootView==="error"){return <BootSplash onMinimumDurationElapsed={()=>setSplashMinDone(true)}/>;}
 
 if(!authenticated){
   if(identity?.displayName === "NexChat User" && identity?.username === "user"){
@@ -4900,7 +4912,7 @@ if(!authenticated){
   );
 }
 
-if(startupError){return <View style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/><View style={{flex:1,alignItems:"center",justifyContent:"center",padding:28,gap:14}}><Text style={{fontSize:44}}>⚠️</Text><Text style={{fontSize:19,fontWeight:"900",color:theme.ink,textAlign:"center"}}>NexChat couldn't start</Text><Text style={{color:theme.muted,textAlign:"center"}}>{startupError}</Text><View style={{width:"100%",gap:10,marginTop:10}}><Button label="Try again" onPress={()=>setStartupRetry(k=>k+1)}/><Button label="Reset local vault (this device only)" danger onPress={()=>Alert.alert("Reset local vault?","This permanently deletes all chats, contacts and settings stored on this device. This cannot be undone, and only helps if the vault itself is what's broken.",[{text:"Reset",style:"destructive",onPress:async()=>{try{await clearVault();setStartupRetry(k=>k+1)}catch(e){Alert.alert("Reset failed",e instanceof Error?e.message:"Unable to reset local vault.")}}},{text:"Cancel",style:"cancel"}])}/></View></View></View>}return <View style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/>{securityLocked&&st.settings.biometricLock?<View style={{flex:1,backgroundColor:theme.bg,alignItems:"center",justifyContent:"center",padding:28}}><Text style={{fontSize:52}}>🔒</Text><Text style={{fontSize:22,fontWeight:"900",color:theme.ink,marginTop:14}}>NexChat is locked</Text><Text style={{color:theme.muted,textAlign:"center",marginTop:8}}>Authenticate with your device biometrics to continue.</Text><View style={{width:"100%",marginTop:22}}><Button label="Unlock with biometrics" onPress={async()=>{if(biometricPromptRef.current)return;biometricPromptRef.current=true;try{const unlocked=await authenticateBiometric();if(unlocked)setSecurityLocked(false);}finally{biometricPromptRef.current=false;}}}/></View></View>:<>{body}{screen.name==="home"&&<View style={[s.nav,{backgroundColor:theme.card,borderTopColor:theme.line,paddingBottom:insets.bottom}]}>{(["Chats","Stories","Feed","Calls","Settings"] as Tab[]).map(x=><TouchableOpacity key={x} onPress={()=>x==="Settings"?setScreen({name:"settings"}):setTab(x)} style={s.navItem}><Text style={{fontSize:18,color:theme.ink}}>{x==="Chats"?"💬":x==="Stories"?"◉":x==="Feed"?"▦":x==="Calls"?"📞":"⚙"}</Text><Text style={{fontSize:11,color:tab===x?theme.brand:theme.muted,fontWeight:"800"}}>{x}</Text></TouchableOpacity>)}</View>}{call&&<CallOverlay
+return <View style={[s.safe,{backgroundColor:theme.bg}]}><StatusBar barStyle={mode==="light"?"dark-content":"light-content"}/>{securityLocked&&st.settings.biometricLock?<View style={{flex:1,backgroundColor:theme.bg,alignItems:"center",justifyContent:"center",padding:28}}><Text style={{fontSize:52}}>🔒</Text><Text style={{fontSize:22,fontWeight:"900",color:theme.ink,marginTop:14}}>NexChat is locked</Text><Text style={{color:theme.muted,textAlign:"center",marginTop:8}}>Authenticate with your device biometrics to continue.</Text><View style={{width:"100%",marginTop:22}}><Button label="Unlock with biometrics" onPress={async()=>{if(biometricPromptRef.current)return;biometricPromptRef.current=true;try{const unlocked=await authenticateBiometric();if(unlocked)setSecurityLocked(false);}finally{biometricPromptRef.current=false;}}}/></View></View>:<>{body}{screen.name==="home"&&<View style={[s.nav,{backgroundColor:theme.card,borderTopColor:theme.line,paddingBottom:insets.bottom}]}>{(["Chats","Stories","Feed","Calls","Settings"] as Tab[]).map(x=><TouchableOpacity key={x} onPress={()=>x==="Settings"?setScreen({name:"settings"}):setTab(x)} style={s.navItem}><Text style={{fontSize:18,color:theme.ink}}>{x==="Chats"?"💬":x==="Stories"?"◉":x==="Feed"?"▦":x==="Calls"?"📞":"⚙"}</Text><Text style={{fontSize:11,color:tab===x?theme.brand:theme.muted,fontWeight:"800"}}>{x}</Text></TouchableOpacity>)}</View>}{call&&<CallOverlay
   contact={contact}
   video={call.video}
   status={call.status}

@@ -15,6 +15,7 @@ import { useNexChatStore } from "../core/store";
 import { Identity } from "../core/identity";
 import { Group, getGroups, getLastGroupMessage } from "../core/groups";
 import { GroupsScreen } from "./GroupsScreen";
+import { useBackInterceptor } from "../core/useBackInterceptor";
 import { CommunitiesScreen } from "./CommunitiesScreen";
 import { ActionSheet, ActionSheetOption } from "./ActionSheet";
 
@@ -39,6 +40,8 @@ export function ChatListScreen({
   const myId = identity?.id;
 
   const [tab, setTab] = useState<ListTab>("All");
+  // Back from the Groups/Communities/Unread filter returns to the main list.
+  useBackInterceptor(tab !== "All", () => setTab("All"));
   const [query, setQuery] = useState("");
   const [groups, setGroups] = useState<Group[]>([]);
   const [groupPreviews, setGroupPreviews] = useState<Record<string, { text: string; time: number }>>({});

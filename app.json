@@ -12,7 +12,8 @@
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS"
-      ]
+      ],
+      "backgroundColor": "#000000"
     },
     "ios": {
       "bundleIdentifier": "com.nexchat.app"
@@ -24,7 +25,20 @@
       "expo-sharing",
       "expo-status-bar",
       "expo-video",
-      "./plugins/withApryse"
+      "./plugins/withApryse",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#000000",
+          "image": "./assets/splash/nexchat-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "dark": {
+            "backgroundColor": "#000000",
+            "image": "./assets/splash/nexchat-icon.png"
+          }
+        }
+      ]
     ],
     "extra": {
       "eas": {
@@ -36,6 +50,7 @@
     },
     "updates": {
       "url": "https://u.expo.dev/95b15e11-4dcd-4ed4-887a-e327d4b6be66"
-    }
+    },
+    "backgroundColor": "#000000"
   }
 }

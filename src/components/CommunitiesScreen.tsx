@@ -22,6 +22,7 @@ import {
   updateCommunity,
 } from "../core/communities";
 import { Group, getGroups } from "../core/groups";
+import { useBackInterceptor } from "../core/useBackInterceptor";
 import { GroupChat } from "./GroupChat";
 
 type CommunitiesScreenProps = {
@@ -42,6 +43,11 @@ export function CommunitiesScreen({ theme, identity }: CommunitiesScreenProps) {
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
   const [openCommunity, setOpenCommunity] = useState<Community | null>(null);
   const [openGroup, setOpenGroup] = useState<Group | null>(null);
+  // Back closes the innermost open view first: group, then community.
+  useBackInterceptor(openGroup !== null || openCommunity !== null, () => {
+    if (openGroup) setOpenGroup(null);
+    else setOpenCommunity(null);
+  });
   const [editingCommunity, setEditingCommunity] = useState(false);
   const [editCommunityName, setEditCommunityName] = useState("");
   const [editCommunityDescription, setEditCommunityDescription] = useState("");

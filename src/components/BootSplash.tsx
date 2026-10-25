@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { Animated, Easing, Image, StyleSheet, Text, View } from "react-native";
+import { Animated, Easing, Image, StatusBar, StyleSheet, Text, View } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import MaskedView from "@react-native-masked-view/masked-view";
 
@@ -125,6 +125,7 @@ export function BootSplash({ onMinimumDurationElapsed }: BootSplashProps) {
 
   return (
     <View style={styles.container}>
+      <StatusBar barStyle="light-content" backgroundColor="#000000" translucent />
       <View style={styles.iconArea}>
         <Animated.View
           style={[
