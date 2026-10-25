@@ -1343,91 +1343,100 @@ function queuePersist(
   return task;
 }
 
-export async function initializeNetworkTransport(): Promise<void> {
-  console.log("[NEXCHAT BOOT NET 01] initializeNetworkTransport START");
+/**
+ * Local-only part of transport startup: restores the durable encrypted queue
+ * and nearby-peer custody from the vault. No network access, so it is safe
+ * (and required) to finish before the UI accepts user input.
+ *
+ * Idempotent: concurrent/repeat callers share one run; a failed run is
+ * cleared so a retry really retries.
+ */
+let localTransportStatePromise: Promise<void> | null = null;
 
-  /*
-   * Restore the durable encrypted offline queue before
-   * the network/relay transport begins processing messages.
-   */
-  console.log("[NEXCHAT BOOT NET 02] initializeQueue START");
-  await initializeQueue();
-  console.log("[NEXCHAT BOOT NET 02] initializeQueue OK");
+export function initializeLocalTransportState(): Promise<void> {
+  if (!localTransportStatePromise) {
+    const p: Promise<void> = (async () => {
+      console.log("[NEXCHAT BOOT NET 01] local transport state START");
+      await initializeQueue();
+      console.log("[NEXCHAT BOOT NET 02] queue restored");
+      await initializePeerStore();
+      console.log("[NEXCHAT BOOT NET 03] peer store restored");
+      // A process can disappear while an item is in "sending".
+      // Those items are safe to retry after startup.
+      recoverInterruptedItems();
+      console.log("[NEXCHAT BOOT NET 04] interrupted items recovered");
+    })().catch((error) => {
+      if (localTransportStatePromise === p) localTransportStatePromise = null;
+      throw error;
+    });
+    localTransportStatePromise = p;
+  }
+  return localTransportStatePromise;
+}
 
-  /*
-   * Restore durable nearby-peer custody before any
-   * nearby forwarding or ACK processing begins.
-   */
-  console.log("[NEXCHAT BOOT NET 03] initializePeerStore START");
-  await initializePeerStore();
-  console.log("[NEXCHAT BOOT NET 03] initializePeerStore OK");
+/**
+ * Network part of transport startup. Must never be a precondition for
+ * showing locally available conversations: the caller runs it in the
+ * background. Directory registration is best-effort, bounded, and runs after
+ * the delivery worker is started so an unreachable relay cannot delay it.
+ *
+ * deliveryWorker.start() is idempotent, so repeated calls do not create
+ * additional worker timers.
+ */
+const DIRECTORY_REGISTRATION_TIMEOUT_MS = 8000;
 
-  /*
-   * A process can disappear while an item is in "sending".
-   * Those items are safe to retry after startup.
-   */
-  console.log("[NEXCHAT BOOT NET 04] recoverInterruptedItems START");
-  recoverInterruptedItems();
-  console.log("[NEXCHAT BOOT NET 04] recoverInterruptedItems OK");
-
-  console.log("[NEXCHAT BOOT NET 05] getIdentity START");
+export async function startNetworkTransport(): Promise<void> {
   const identity = await getIdentity();
-  console.log("[NEXCHAT BOOT NET 05] getIdentity OK", {
-    id: identity?.id,
-  });
 
   if (!identity?.id) {
-    console.log("[NEXCHAT BOOT NET 06] NO ID - network startup STOPPED");
+    console.log("[NEXCHAT BOOT NET 05] no identity id - network start skipped");
     return;
   }
 
-  console.log("[NEXCHAT BOOT NET 07] configureRelayTransport START");
   configureRelayTransport(identity.id);
-  console.log("[NEXCHAT BOOT NET 07] configureRelayTransport OK");
 
-  /*
-   * Publish the public identity needed for universal user discovery.
-   * This contains no private encryption material.
-   */
-  if (relayTransport) {
+  // Application-layer nearby bridge. The native adapters currently report
+  // unavailable, so this does not claim Bluetooth/Wi-Fi Direct connectivity.
+  configureNearbyPeerBridge(identity.id);
+
+  deliveryWorker.start(identity.id);
+  console.log("[NEXCHAT BOOT NET 06] delivery worker started");
+
+  // Publish the public identity needed for universal user discovery.
+  // Contains no private encryption material.
+  const relay = relayTransport;
+  if (relay) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await relayTransport.registerDirectoryUser({
-        id: identity.id,
-        displayName: identity.displayName,
-        username: identity.username,
-        publicKey: identity.publicKey,
-        avatarUri: identity.avatarUri,
-        bio: identity.bio,
-      });
-
-      console.log("[NEXCHAT BOOT NET 07B] directory registration sent");
+      await Promise.race([
+        relay.registerDirectoryUser({
+          id: identity.id,
+          displayName: identity.displayName,
+          username: identity.username,
+          publicKey: identity.publicKey,
+          avatarUri: identity.avatarUri,
+          bio: identity.bio,
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("directory registration timed out")),
+            DIRECTORY_REGISTRATION_TIMEOUT_MS,
+          );
+        }),
+      ]);
+      console.log("[NEXCHAT BOOT NET 07] directory registration sent");
     } catch (error) {
-      console.warn(
-        "[NEXCHAT BOOT NET 07B] directory registration failed",
-        error,
-      );
+      console.warn("[NEXCHAT BOOT NET 07] directory registration failed", error);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
+}
 
-  /*
-   * Initialize the application-layer nearby bridge after identity
-   * restoration. The native adapters currently report unavailable,
-   * so this does not claim Bluetooth/Wi-Fi Direct connectivity.
-   */
-  console.log("[NEXCHAT BOOT NET 08] configureNearbyPeerBridge START");
-  configureNearbyPeerBridge(identity.id);
-  console.log("[NEXCHAT BOOT NET 08] configureNearbyPeerBridge OK");
-
-  /*
-   * Start durable outbound delivery after queue restoration.
-   * start() is idempotent, so repeated initialization will
-   * not create multiple worker timers.
-   */
-  console.log("[NEXCHAT BOOT NET 09] deliveryWorker.start START");
-  deliveryWorker.start(identity.id);
-  console.log("[NEXCHAT BOOT NET 09] deliveryWorker.start OK");
-
-  console.log("[NEXCHAT BOOT NET 10] initializeNetworkTransport COMPLETE");
+/** Backwards-compatible full initialisation (local state, then network). */
+export async function initializeNetworkTransport(): Promise<void> {
+  await initializeLocalTransportState();
+  await startNetworkTransport();
 }
 
 export function useNexChatStore() {

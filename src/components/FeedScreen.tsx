@@ -44,6 +44,7 @@ import {
   removeRecentFeedSearch,
 } from "../core/feedSearch";
 import { useNexChatStore } from "../core/store";
+import { useBackInterceptor } from "../core/useBackInterceptor";
 
 import {
   createFeedPost,
@@ -1850,6 +1851,7 @@ export function FeedScreen({
   const [activeCommentPost, setActiveCommentPost] =
     useState<FeedPost | null>(null);
   const [profileCreator, setProfileCreator] = useState<FeedCreator | null>(null);
+  useBackInterceptor(profileCreator !== null, () => setProfileCreator(null));
   const [postMenuPost, setPostMenuPost] = useState<FeedPost | null>(null);
   const [audiencePost, setAudiencePost] = useState<FeedPost | null>(null);
   const [hiddenPostIds, setHiddenPostIds] = useState<Set<string>>(new Set());

@@ -13,6 +13,7 @@ import {
 } from "react-native";
 
 import { useNexChatStore } from "../core/store";
+import { useBackInterceptor } from "../core/useBackInterceptor";
 import { Identity } from "../core/identity";
 import { pickProfilePhoto } from "../core/media";
 import {
@@ -47,6 +48,10 @@ export function GroupsScreen({ theme, identity }: GroupsScreenProps) {
   const [newAvatarUri, setNewAvatarUri] = useState<string | null>(null);
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
   const [openGroup, setOpenGroup] = useState<Group | null>(null);
+  useBackInterceptor(openGroup !== null, () => {
+    setOpenGroup(null);
+    void load();
+  });
   const [infoGroup, setInfoGroup] = useState<Group | null>(null);
 
   const refreshInfoGroup = useCallback(async (groupId: string) => {
