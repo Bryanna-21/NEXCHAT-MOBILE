@@ -4293,8 +4293,9 @@ function LoginScreen({
           }}
         >
           Password access protects this device session.
-          Cross-device message recovery uses NexChat's
-          encrypted backup or trusted-device recovery.
+          Encrypted backups can only be restored on this
+          same NexChat installation. Moving chats to another
+          device is not available yet.
         </Text>
       </ScrollView>
     </View>

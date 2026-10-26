@@ -57,6 +57,15 @@ function persistQueueSoon(): void {
   }, 150);
 }
 
+function flushQueueNow(): void {
+  if (persistenceTimer) {
+    clearTimeout(persistenceTimer);
+    persistenceTimer = null;
+  }
+
+  void persistQueue();
+}
+
 async function persistQueue(): Promise<void> {
   try {
     const AsyncStorage =
@@ -90,7 +99,21 @@ export async function initializeQueue(): Promise<void> {
       );
 
     if (raw) {
-      const parsed = JSON.parse(raw);
+      let parsed: unknown;
+
+      try {
+        parsed = JSON.parse(raw);
+      } catch (parseError) {
+        /*
+         * Keep the unreadable data for diagnosis/recovery; the next
+         * persist would otherwise overwrite it with an empty queue.
+         */
+        await AsyncStorage.setItem(
+          `${QUEUE_STORAGE_KEY}.corrupt`,
+          raw,
+        );
+        throw parseError;
+      }
 
       if (Array.isArray(parsed)) {
         const now = Date.now();
@@ -249,7 +272,14 @@ export function enqueue(
   };
 
   queue.push(item);
-  persistQueueSoon();
+
+  /*
+   * Persist immediately rather than after the debounce window: the UI
+   * already shows this message as sent/sending, so it must survive the
+   * process being killed within the next 150 ms. persistQueue() snapshots
+   * the queue synchronously, and AsyncStorage applies writes in call order.
+   */
+  flushQueueNow();
 
   return { ...item };
 }

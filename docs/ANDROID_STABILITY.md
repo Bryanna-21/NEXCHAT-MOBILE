@@ -37,12 +37,32 @@ window background), so there is no white window between the native launch
 screen and the in-app `BootSplash`. The native splash is held with
 `preventAutoHideAsync()` and released after the first JS frame.
 
+## Delivery queue durability
+
+`enqueue` now persists immediately instead of after the 150 ms debounce, so a
+message the UI shows as sending survives the process being killed right after.
+An unreadable stored queue is copied to `@nexchat/transport-queue/v2.corrupt`
+before startup continues, instead of being silently overwritten. The state
+machine (queued -> sending -> accepted -> delivered / failed) is covered by
+`src/core/__tests__/queue.test.ts`. "Accepted" means a transport took the
+message, not that the peer received it; only a delivery receipt marks it
+delivered.
+
 ## Known limitations (not changed here)
 
 - **Password storage** (`src/core/account.ts`) is local only: salted SHA-256
   iterated 12,000 times via async native calls. This is not a memory-hard KDF.
   Replacing it needs a native KDF module (Argon2/scrypt/PBKDF2) validated on a
   device. There is no server-backed account or cross-device recovery.
+- **Backups are bound to the installation.** The vault key is a random per-install
+  key in the device keystore and backups are not passphrase-wrapped, so
+  `restoreVaultFromEncryptedEnvelope` can only decrypt a backup made by the same
+  installation. Restore on a new phone or after reinstall fails with a clear
+  message. Restore itself is sound: it asks for confirmation, validates before
+  writing, rolls back on failure, and re-hydrates the store. Real cross-device
+  recovery needs a passphrase-derived backup key (same KDF dependency as above)
+  or a device-to-device transport. The login-screen copy that claimed otherwise
+  has been corrected.
 - **Document preview** loads pdf.js, docx-preview and pptx-viewer from jsDelivr
   inside a WebView, so it does not work offline. The npm packages `pdfjs-dist`,
   `docx-preview`, `pptx-viewer` and `xlsx` are never imported.
