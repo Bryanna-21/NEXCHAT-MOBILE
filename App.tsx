@@ -1054,7 +1054,7 @@ function Chat({
 
   useEffect(() => {
     void st.markConversationRead(peerId);
-  }, [peerId, st.markConversationRead]);
+  }, [peerId, c?.messages.length, st.markConversationRead]);
 
   /*
    * A per-chat theme override was already being saved by the

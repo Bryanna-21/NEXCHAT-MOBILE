@@ -621,7 +621,8 @@ async function markMessageRead(
         message.id !== messageId ||
         message.senderId !== "me" ||
         message.recipientId !== recipientId ||
-        message.status !== "delivered"
+        (message.status !== "delivered" &&
+          message.status !== "sent")
       ) {
         return message;
       }
